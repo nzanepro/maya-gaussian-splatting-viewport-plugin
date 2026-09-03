@@ -174,10 +174,19 @@ absent. The renderer detects this on the first draw and falls back:
 define, so the EWA projection and SH evaluation cannot drift apart. The
 `#version` line is supplied by the loader rather than the file.
 
-Expect the macOS path to be slower on large scenes: the sort is single-threaded
-on the CPU and its result is uploaded each time the camera moves, where the
-Windows path keeps everything resident on the GPU. Scenes in the low hundreds
-of thousands of splats are comfortable; multi-million-splat scenes will not be.
+The sort is single-threaded and its result is uploaded whenever the camera
+moves, where the Windows path keeps everything resident on the GPU. Measured on
+an M1 (depth transform plus radix sort, the whole per-move CPU cost):
+
+| Splats | Sort |
+| ------ | ---- |
+| 150k | 1.7 ms |
+| 500k | 4.4 ms |
+| 1.7M | 14.9 ms |
+
+So the sort is not usually the limiting factor — rasterising that many
+overlapping alpha-blended splats is. Texture-buffer fetches are also somewhat
+slower than SSBO reads.
 
 ## Known Limitations
 
