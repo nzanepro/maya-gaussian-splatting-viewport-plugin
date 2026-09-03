@@ -63,29 +63,73 @@ def read_positions(path):
 def find_shell(xyz):
     """Locate the background sphere projection.
 
-    3DGS training puts distant content on a large sphere around the capture
-    origin, leaving a radial void between it and the real scene. Cutting at the
-    widest gap in the radius distribution above p95 finds that void without any
-    scene-specific threshold.
+    3DGS pushes anything whose depth the optimiser cannot constrain out onto a
+    large sphere around the capture origin. Outdoors that is genuinely distant
+    content; indoors it is flat painted wall, which gives no parallax, so an
+    interior can carry a *larger* shell than an exterior — measured at 6.7% of
+    an interior bedroom capture against 1.3% of an outdoor one.
+
+    That range is why the cut is not taken from a fixed percentile. Searching
+    the tail above p95 assumes the shell is smaller than 5% of the scene; on
+    the bedroom p95 already lies inside the shell, so the search saw only shell
+    points, found no void, and reported nothing.
+
+    Instead scan candidate cuts outward and take the first that leaves a thin,
+    populated shell behind it. The smallest such cut is the right one: it keeps
+    the shell whole, where a larger cut would slice off its inner face.
     """
     centre = np.median(xyz, axis=0)
     radius = np.linalg.norm(xyz - centre, axis=1)
+    n_total = len(xyz)
 
-    tail = np.sort(radius)
-    tail = tail[tail > np.percentile(radius, 95)]
-    gaps = np.diff(tail)
-    i = int(np.argmax(gaps))
-    cut = 0.5 * (tail[i] + tail[i + 1])
+    # Candidates: every large relative jump in the sorted radii, plus a spread
+    # of percentiles so a shell with no crisp void is still found.
+    order = np.sort(radius)
+    lo_i = int(0.5 * len(order))
+    tail = order[lo_i:]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.diff(tail) / np.maximum(tail[:-1], 1e-9)
+    cuts = [0.5 * (tail[i] + tail[i + 1]) for i in np.argsort(ratio)[-12:]]
+    cuts += list(np.percentile(radius, np.linspace(50, 99.5, 40)))
 
-    fit = _fit_sphere(xyz[radius > cut])
-    if not fit:
-        return dict(cut=float(cut), found=False)
-    fit.update(cut=float(cut), gap=float(gaps[i]), n_total=int(len(xyz)))
-    return fit
+    best = None
+    for cut in sorted(set(float(c) for c in cuts)):
+        gap = _void_width(order, cut)
+        fit = _fit_sphere(xyz[radius > cut], n_total, cut, gap)
+        if fit and fit['found']:
+            fit.update(cut=float(cut), gap=float(gap), n_total=int(n_total))
+            best = fit
+            break
+
+    if best is None:
+        cut = float(cuts[0]) if cuts else float(np.percentile(radius, 99))
+        gap = _void_width(order, cut)
+        base = dict(cut=cut, gap=gap, n_total=int(n_total), found=False)
+        fit = _fit_sphere(xyz[radius > cut], n_total, cut, gap)
+        if fit:
+            base.update(fit)
+            base['found'] = False
+        return base
+    return best
 
 
-def _fit_sphere(shell):
-    """Algebraic fit: |p - c|^2 = r^2 is linear in (c, r^2 - |c|^2)."""
+def _void_width(sorted_radii, cut):
+    """Width of the empty band the cut sits in — how isolated the shell is."""
+    i = int(np.searchsorted(sorted_radii, cut))
+    lo = sorted_radii[i - 1] if i > 0 else sorted_radii[0]
+    hi = sorted_radii[i] if i < len(sorted_radii) else sorted_radii[-1]
+    return float(hi - lo)
+
+
+def _fit_sphere(shell, n_total, cut, gap):
+    """Algebraic fit: |p - c|^2 = r^2 is linear in (c, r^2 - |c|^2).
+
+    Thinness alone is not enough to call something a background sphere. Any
+    handful of stray outliers sits near *some* sphere, and every scene has a
+    widest gap in its radius tail, so an interior capture with no background at
+    all would otherwise "detect" a shell made of a dozen points. Require the
+    candidate to be populated and to sit beyond a real void as well.
+    """
     if len(shell) < 16:
         return None
     A = np.hstack([2 * shell, np.ones((len(shell), 1))])
@@ -93,20 +137,47 @@ def _fit_sphere(shell):
     c = sol[:3]
     r = math.sqrt(sol[3] + float((c ** 2).sum()))
     thickness = float(np.linalg.norm(shell - c, axis=1).std())
-    return dict(found=thickness / r < 0.12, centre=c, radius=r,
-                thickness=thickness, ratio=thickness / r, n_shell=int(len(shell)))
+
+    # 0.05, not 0.12. A real shell is very thin — 0.005 to 0.026 across the
+    # captures measured — and a loose bound let the X-29 stop at a cut of 8.7
+    # with ratio 0.117, dragging the sparse tail in front of the shell into the
+    # fit and putting the sphere 1.7 units off.
+    thin = thickness / r < 0.05
+    populated = len(shell) >= max(200, 0.001 * n_total)   # >= 0.1% of the scene
+    real_void = cut > 0 and gap / cut >= 0.02
+    return dict(found=bool(thin and populated and real_void),
+                centre=c, radius=r, thickness=thickness, ratio=thickness / r,
+                n_shell=int(len(shell)), thin=bool(thin),
+                populated=bool(populated), real_void=bool(real_void),
+                void_ratio=float(gap / cut) if cut else 0.0)
 
 
-def find_ground(core, seed=0, tol=0.05, iters=500):
-    """RANSAC the dominant plane, then refit on its inliers.
+def find_ground(core, seed=0, tol=0.05, iters=800, max_tilt=40.0, ground='auto'):
+    """RANSAC the ground plane, then refit on its inliers.
 
-    The refit matters: a plane taken straight from three random points inherits
-    their noise, and the tilt is what gets used to level the scene.
+    Two constraints, both needed on real captures:
+
+    Gravity. The largest plane in a scene is often not the floor — in an
+    interior the floor is hidden under furniture while a bare wall is fully
+    visible, so unconstrained RANSAC returns a wall (measured on a bedroom
+    capture: a wall with 24% inliers, 89 degrees off vertical). Polycam exports
+    are roughly gravity-aligned, so candidates whose normal is more than
+    `max_tilt` from the Y axis are rejected. The bound is loose because the
+    alignment is only approximate — the X-29 capture sits 13.6 degrees off.
+
+    Floor, not ceiling. Both satisfy the gravity constraint. With the normal
+    oriented +Y, the floor is the one with the scene on its negative side.
+
+    The inlier refit matters too: a plane taken straight from three random
+    points inherits their noise, and the tilt is what levels the scene.
     """
     rng = np.random.default_rng(seed)
     sub = core if len(core) <= 200000 else core[rng.choice(len(core), 200000, replace=False)]
 
-    best = (0, None, None)
+    Y = np.array([0.0, 1.0, 0.0])
+    cos_limit = math.cos(math.radians(max_tilt))
+    best = (0, None, None)          # gravity-aligned, floor-like
+    fallback = (0, None, None)      # best of anything, if nothing qualifies
     for _ in range(iters):
         p = sub[rng.choice(len(sub), 3, replace=False)]
         n = np.cross(p[1] - p[0], p[2] - p[0])
@@ -115,10 +186,25 @@ def find_ground(core, seed=0, tol=0.05, iters=500):
             continue
         n = n / ln
         d = -float(n.dot(p[0]))
+        if n[1] < 0:
+            n, d = -n, -d
         inl = int((np.abs(sub @ n + d) < tol).sum())
+        if inl > fallback[0]:
+            fallback = (inl, n, d)
+        if abs(float(n.dot(Y))) < cos_limit:
+            continue
+        # A floor or ceiling is a boundary: nearly all the scene lies on one
+        # side of it. Accept either and work out which afterwards, rather than
+        # assuming the Y-down convention here and then "deducing" it later.
+        below = float((sub @ n + d < 0).mean())
+        if 0.4 < below < 0.6:
+            continue
         if inl > best[0]:
             best = (inl, n, d)
 
+    constrained = best[1] is not None
+    if not constrained:
+        best = fallback
     n, d = best[1], best[2]
     for _ in range(8):
         pts = sub[np.abs(sub @ n + d) < tol]
@@ -131,12 +217,62 @@ def find_ground(core, seed=0, tol=0.05, iters=500):
     if n[1] < 0:
         n, d = -n, -d
 
-    signed = sub @ n + d
-    # The scene body sits on whichever side has the long tail. If that is the
-    # -n side then n points downward and the capture is upside down.
-    upside_down = abs(np.percentile(signed, 1)) > abs(np.percentile(signed, 99))
+    # Refine against the floor band only. RANSAC scores by inlier count, so in
+    # a furnished room it settles on a mixture of floor, bed and wall — on a
+    # bedroom capture that read 5.4 degrees of tilt for a floor that is level.
+    # The floor is the scene's lower boundary, so refitting to just the slab at
+    # that end removes everything standing on it: same capture, 0.57 degrees.
+    proj = sub @ n
+    below0 = float((sub @ n + d < 0).mean())
+    floor_at_max = below0 >= 0.5      # scene on the -n side => floor at high n
+    edge = np.percentile(proj, 99.5 if floor_at_max else 0.5)
+    width = 0.03 * float(np.percentile(proj, 99.5) - np.percentile(proj, 0.5))
+    band = sub[np.abs(proj - edge) < max(width, 1e-6)]
+    if len(band) >= 200:
+        bn, bc = n, band.mean(axis=0)
+        for _ in range(6):
+            bd = -float(bn.dot(bc))
+            keep = band[np.abs(band @ bn + bd) < max(width / 3.0, 1e-6)]
+            if len(keep) < 50:
+                break
+            bc = keep.mean(axis=0)
+            bn = np.linalg.svd(keep - bc, full_matrices=False)[2][2]
+            bn /= np.linalg.norm(bn)
+            if bn[1] < 0:
+                bn = -bn
+        # Only accept it if it stayed gravity-aligned; a wild swing means the
+        # band caught something other than floor.
+        if abs(float(bn.dot(Y))) >= cos_limit:
+            n, d = bn, -float(bn.dot(bc))
 
-    return dict(normal=n, d=d,
+    # Level or genuinely sloped?
+    #
+    # Polycam output is gravity-aligned via ARKit, so on a level floor the
+    # fitted tilt is just fit noise and snapping to the gravity axis is more
+    # accurate than trusting it. On sloping ground the tilt is real and must be
+    # kept, or the scene is levelled to gravity when the subject is not.
+    #
+    # The two are far apart in practice: a level bedroom floor fits to 1.7
+    # degrees, an aircraft parked on a hill to 13.5. 'auto' splits them at 3.
+    fitted_tilt = math.degrees(math.acos(min(1.0, max(-1.0, abs(float(n[1]))))))
+    snapped = False
+    if ground == 'level' or (ground == 'auto' and fitted_tilt < 3.0):
+        keep_d = -float(np.array([0.0, 1.0, 0.0]).dot(-d * n / max(n.dot(n), 1e-12)))
+        n = np.array([0.0, 1.0, 0.0])
+        d = keep_d
+        snapped = True
+
+    signed = sub @ n + d
+    # The scene sits on one side of its ground plane, and that side is up.
+    # n is oriented +Y, so if the scene is on the -n side then up is -Y in
+    # capture space and the whole thing has to be turned over.
+    below = float((signed < 0).mean())
+    up = -n if below >= 0.5 else n
+    upside_down = bool(up[1] < 0)
+
+    return dict(normal=n, d=d, gravity_constrained=bool(constrained),
+                up=up, scene_below_frac=below,
+                fitted_tilt=float(fitted_tilt), levelled_to_gravity=bool(snapped),
                 inliers=int((np.abs(signed) < tol).sum()), n_sub=int(len(sub)),
                 y_at_origin=float(-d / n[1]),
                 rot_x=float(math.degrees(math.atan2(n[2], n[1]))),
@@ -146,7 +282,7 @@ def find_ground(core, seed=0, tol=0.05, iters=500):
                 body_height=float(abs(np.percentile(signed, 0.5))))
 
 
-def analyze(path, percent=100.0, seed=0):
+def analyze(path, percent=100.0, seed=0, ground='auto'):
     """Analyse `percent` of the splats, taken as every Nth point.
 
     percent=10 keeps every 10th splat, percent=100 keeps all. Striding rather
@@ -170,7 +306,8 @@ def analyze(path, percent=100.0, seed=0):
 
     if stride > 1:
         full_r = np.linalg.norm(full - centre, axis=1)
-        refit = _fit_sphere(full[full_r > shell['cut']])
+        refit = _fit_sphere(full[full_r > shell['cut']], full_n,
+                            shell['cut'], shell.get('gap', 0.0))
         if refit:
             shell.update(refit)
             shell['n_total'] = full_n
@@ -178,7 +315,7 @@ def analyze(path, percent=100.0, seed=0):
     else:
         core = xyz[np.linalg.norm(xyz - centre, axis=1) <= shell['cut']]
 
-    ground = find_ground(core, seed=seed)
+    ground = find_ground(core, seed=seed, ground=ground)
 
     n, d = ground['normal'], ground['d']
     box = None
@@ -212,7 +349,19 @@ def report(res):
             print("  centre sits %+.4f above the ground plane (%.0f%% of body height)"
                   % (s['height_above_ground'], 100 * s['frac_of_body_height']))
     else:
-        print("  none detected (no clean shell above p95)")
+        why = []
+        if 'thin' in s:
+            if not s['thin']:
+                why.append("not a thin shell (thickness/radius %.3f)" % s['ratio'])
+            if not s['populated']:
+                why.append("only %d splats beyond the cut" % s['n_shell'])
+            if not s['real_void']:
+                why.append("no real void (gap/cut %.4f)" % s['void_ratio'])
+        else:
+            why.append("fewer than 16 splats beyond the cut")
+        print("  none detected — %s" % "; ".join(why))
+        print("  (expected for interiors: a closed room has no distant content "
+              "to project onto a sphere)")
 
     print("\nGROUND PLANE")
     print("  normal  [%+.5f %+.5f %+.5f]   %d/%d inliers (%.1f%%)"
@@ -220,8 +369,18 @@ def report(res):
     print("  crosses Y at %.4f" % g['y_at_origin'])
     print("  rotate X %.4f deg   rotate Z %.4f deg   (tilt %.4f off +Y)"
           % (g['rot_x'], g['rot_z'], g['tilt']))
+    if g.get('levelled_to_gravity'):
+        print("  fitted tilt was %.4f deg — treated as level and snapped to the "
+              "gravity axis" % g['fitted_tilt'])
+        print("  (pass --ground sloped if the ground really is at that angle)")
+    else:
+        print("  ground treated as genuinely sloped at %.4f deg" % g['fitted_tilt'])
+        print("  (pass --ground level to snap it flat instead)")
     print("  capture is %s" % ("UPSIDE DOWN — add 180 about X" if g['upside_down']
                                else "right way up"))
+    if not g.get('gravity_constrained', True):
+        print("  WARNING: no gravity-aligned floor-like plane found; this is the "
+              "largest plane of any orientation and may be a wall")
 
     print("\nSUGGESTED CULL CUBE (world space, before levelling)")
     print("  translate (%.4f, %.4f, %.4f)" % tuple(b['centre']))
@@ -294,8 +453,12 @@ def main():
                     help='percentage of splats to analyse, taken as every Nth '
                          'point (10 = every 10th). Default 100. The ground fit '
                          'holds down to well under 1 percent.')
+    ap.add_argument('--ground', choices=('auto', 'level', 'sloped'), default='auto',
+                    help="'auto' (default) snaps a fitted tilt under 3 degrees to "
+                         "the gravity axis and keeps anything larger; 'level' always "
+                         "snaps; 'sloped' always trusts the fit")
     args = ap.parse_args()
-    report(analyze(args.ply, percent=args.percent))
+    report(analyze(args.ply, percent=args.percent, ground=args.ground))
 
 
 if __name__ == '__main__':

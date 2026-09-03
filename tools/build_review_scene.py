@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
-          scale=1.0, splat_scale=1.0, ref_size=None, ref_name='ref'):
+          scale=1.0, splat_scale=1.0, ref_size=None, ref_name='ref',
+          ground='auto'):
     import maya.standalone
     maya.standalone.initialize(name='python')
     import maya.cmds as cmds
@@ -24,7 +25,7 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
     import analyze_splat_ply as A
 
     print("[review] analysing %s" % ply)
-    res = A.analyze(ply, percent=percent)
+    res = A.analyze(ply, percent=percent, ground=ground)
     A.report(res)
     g, s, b = res['ground'], res['shell'], res['box']
 
@@ -267,6 +268,8 @@ if __name__ == '__main__':
                     help='build a wireframe box of this real size in cm, standing '
                          'on the ground, to calibrate --scale against by eye')
     ap.add_argument('--ref-name', default='ref', dest='ref_name')
+    ap.add_argument('--ground', choices=('auto', 'level', 'sloped'), default='auto',
+                    help="see analyze_splat_ply.py --ground")
     a = ap.parse_args()
     build(a.ply, a.out, a.plugin, a.percent, a.display_percent, a.box_trim,
-          a.scale, a.splat_scale, a.ref_size, a.ref_name)
+          a.scale, a.splat_scale, a.ref_size, a.ref_name, a.ground)
