@@ -11,10 +11,10 @@ ground plane, and a cull cube around the good data:
 
     import sys; sys.path.insert(0, ".../tools")
     import analyze_splat_ply as a
-    a.build_rig(a.analyze("/path/scene.ply"))
+    a.build_rig(a.analyze("/path/scene.ply", percent=10))
 
-Both detections are stable on a few thousand points, so `sample` keeps this
-fast on multi-million-splat files.
+Both detections are stable on a small fraction of the splats, so `percent`
+keeps this fast on multi-million-splat files.
 """
 from __future__ import annotations
 
@@ -146,34 +146,35 @@ def find_ground(core, seed=0, tol=0.05, iters=500):
                 body_height=float(abs(np.percentile(signed, 0.5))))
 
 
-def analyze(path, sample=0, seed=0):
-    """Two-stage so sampling stays honest.
+def analyze(path, percent=100.0, seed=0):
+    """Analyse `percent` of the splats, taken as every Nth point.
 
-    The cut radius and the ground plane are stable from a few thousand points.
-    The sphere *centre* is not: a subsample leaves only a handful of shell
-    points and the fit wanders by a large fraction of the body height. So the
-    cut is found on the sample, then every shell point in the full data is
-    collected for the sphere fit — that is one extra pass over the radii and
-    a fit over ~1% of the splats, which costs almost nothing.
+    percent=10 keeps every 10th splat, percent=100 keeps all. Striding rather
+    than random sampling costs nothing to compute and is reproducible; the two
+    agree closely here because 3DGS output is not ordered periodically.
+
+    Two-stage on purpose. The cut radius and the ground plane are stable from a
+    few thousand points. The sphere *centre* is not: a thin sample leaves only
+    a handful of shell points and the fit wanders by a large fraction of the
+    body height. So the cut comes from the sample, then every shell point in
+    the full data is collected for the sphere fit — one extra pass over the
+    radii plus a fit over ~1% of the splats.
     """
     full = read_positions(path)
     full_n = len(full)
-    xyz = full
-    if sample and sample < full_n:
-        xyz = full[np.random.default_rng(seed).choice(full_n, sample, replace=False)]
+    stride = max(1, int(round(100.0 / max(percent, 1e-9))))
+    xyz = full[::stride] if stride > 1 else full
 
     shell = find_shell(xyz)
     centre = np.median(xyz, axis=0)
 
-    if sample and sample < full_n:
+    if stride > 1:
         full_r = np.linalg.norm(full - centre, axis=1)
         refit = _fit_sphere(full[full_r > shell['cut']])
         if refit:
             shell.update(refit)
             shell['n_total'] = full_n
-        core = full[full_r <= shell['cut']]
-        if len(core) > 200000:
-            core = core[np.random.default_rng(seed + 1).choice(len(core), 200000, replace=False)]
+        core = full[full_r <= shell['cut']][::stride]
     else:
         core = xyz[np.linalg.norm(xyz - centre, axis=1) <= shell['cut']]
 
@@ -190,14 +191,16 @@ def analyze(path, sample=0, seed=0):
     hi = np.percentile(core, 99.5, axis=0)
     box = dict(centre=(lo + hi) / 2, size=hi - lo)
 
-    return dict(path=path, n_total=full_n, analysed=len(xyz),
+    return dict(path=path, n_total=full_n, analysed=len(xyz), stride=stride,
                 shell=shell, ground=ground, box=box, core_aabb=(lo, hi),
                 aabb_before=(xyz.min(axis=0), xyz.max(axis=0)))
 
 
 def report(res):
     s, g, b = res['shell'], res['ground'], res['box']
-    print("%s\n  %d splats (analysed %d)" % (res['path'], res['n_total'], res['analysed']))
+    print("%s\n  %d splats (analysed %d — every %s)"
+          % (res['path'], res['n_total'], res['analysed'],
+             "point" if res['stride'] == 1 else "%dth point" % res['stride']))
 
     print("\nSPHERE PROJECTION")
     if s.get('found'):
@@ -287,11 +290,12 @@ def _wireframe(node):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('ply')
-    ap.add_argument('--sample', type=int, default=0,
-                    help='analyse only N random splats (0 = all). '
-                         'Both fits are stable from ~5000.')
+    ap.add_argument('--percent', type=float, default=100.0,
+                    help='percentage of splats to analyse, taken as every Nth '
+                         'point (10 = every 10th). Default 100. The ground fit '
+                         'holds down to well under 1 percent.')
     args = ap.parse_args()
-    report(analyze(args.ply, sample=args.sample))
+    report(analyze(args.ply, percent=args.percent))
 
 
 if __name__ == '__main__':

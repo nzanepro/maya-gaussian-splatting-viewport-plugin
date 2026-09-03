@@ -41,14 +41,20 @@ sphere centre, a wireframe shell, the ground plane, and a cull cube:
 ```python
 import sys; sys.path.insert(0, "<repo>/tools")
 import analyze_splat_ply as a
-a.build_rig(a.analyze("/path/scene.ply", sample=5000))
+a.build_rig(a.analyze("/path/scene.ply", percent=10))
 ```
 
-`--sample` is two-stage on purpose. The cut radius and the ground plane are
-stable from a few thousand points, but the sphere *centre* is not — a
-subsample leaves too few shell points and the fit wanders. So the cut comes
-from the sample and the sphere is then fitted against every shell point in the
-full data.
+`--percent` takes every Nth point (`--percent 10` = every 10th). Measured on
+the X-29 capture, the ground tilt holds to within 0.04 degrees all the way down
+to 0.3% (5,073 of 1.69M splats), and striding matches random sampling for
+spatial uniformity (voxel-occupancy correlation 0.9998 against the full cloud
+at 10%).
+
+It is two-stage on purpose. The cut radius and the ground plane are stable at
+those rates, but the sphere *centre* is not — a thin sample leaves too few
+shell points and the fit wanders by a large fraction of the body height. So the
+cut comes from the sample and the sphere is then fitted against every shell
+point in the full data, which makes the centre identical at every rate.
 
 `decimate_ply.py` writes a smaller `.ply` by keeping every Nth splat, which
 separates "does it render correctly" from "is it fast enough" when testing:
