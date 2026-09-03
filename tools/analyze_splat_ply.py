@@ -152,7 +152,8 @@ def _fit_sphere(shell, n_total, cut, gap):
                 void_ratio=float(gap / cut) if cut else 0.0)
 
 
-def find_ground(core, seed=0, tol=0.05, iters=800, max_tilt=40.0, ground='auto'):
+def find_ground(core, seed=0, tol=0.05, iters=800, max_tilt=40.0, ground='auto',
+                up_axis=None):
     """RANSAC the ground plane, then refit on its inliers.
 
     Two constraints, both needed on real captures:
@@ -175,6 +176,33 @@ def find_ground(core, seed=0, tol=0.05, iters=800, max_tilt=40.0, ground='auto')
     sub = core if len(core) <= 200000 else core[rng.choice(len(core), 200000, replace=False)]
 
     Y = np.array([0.0, 1.0, 0.0])
+
+    # Explicit override. Needed when the solve itself is not gravity-aligned:
+    # no geometric heuristic recovers the floor reliably in that case, because
+    # the largest, flattest and densest planes in a cluttered space are often
+    # walls rather than the floor.
+    if up_axis is not None:
+        n = np.asarray(up_axis, dtype=float)
+        n /= np.linalg.norm(n)
+        if n[1] < 0:
+            n = -n
+        proj = sub @ n
+        below_all = float((proj < np.median(proj)).mean())
+        edge = np.percentile(proj, 99.5 if below_all >= 0.5 else 0.5)
+        d = -float(edge)
+        signed = sub @ n + d
+        below = float((signed < 0).mean())
+        up = -n if below >= 0.5 else n
+        return dict(normal=n, d=d, gravity_constrained=True, up=up,
+                    scene_below_frac=below, fitted_tilt=0.0,
+                    levelled_to_gravity=False, user_up=True,
+                    inliers=int((np.abs(signed) < tol).sum()), n_sub=int(len(sub)),
+                    y_at_origin=float(-d / n[1]) if abs(n[1]) > 1e-9 else 0.0,
+                    rot_x=float(math.degrees(math.atan2(n[2], n[1]))),
+                    rot_z=float(math.degrees(math.atan2(-n[0], n[1]))),
+                    tilt=float(math.degrees(math.acos(np.clip(n[1], -1, 1)))),
+                    upside_down=bool(up[1] < 0),
+                    body_height=float(abs(np.percentile(signed, 0.5))))
     cos_limit = math.cos(math.radians(max_tilt))
     best = (0, None, None)          # gravity-aligned, floor-like
     fallback = (0, None, None)      # best of anything, if nothing qualifies
@@ -282,7 +310,7 @@ def find_ground(core, seed=0, tol=0.05, iters=800, max_tilt=40.0, ground='auto')
                 body_height=float(abs(np.percentile(signed, 0.5))))
 
 
-def analyze(path, percent=100.0, seed=0, ground='auto'):
+def analyze(path, percent=100.0, seed=0, ground='auto', up_axis=None):
     """Analyse `percent` of the splats, taken as every Nth point.
 
     percent=10 keeps every 10th splat, percent=100 keeps all. Striding rather
@@ -315,7 +343,7 @@ def analyze(path, percent=100.0, seed=0, ground='auto'):
     else:
         core = xyz[np.linalg.norm(xyz - centre, axis=1) <= shell['cut']]
 
-    ground = find_ground(core, seed=seed, ground=ground)
+    ground = find_ground(core, seed=seed, ground=ground, up_axis=up_axis)
 
     n, d = ground['normal'], ground['d']
     box = None
@@ -369,7 +397,9 @@ def report(res):
     print("  crosses Y at %.4f" % g['y_at_origin'])
     print("  rotate X %.4f deg   rotate Z %.4f deg   (tilt %.4f off +Y)"
           % (g['rot_x'], g['rot_z'], g['tilt']))
-    if g.get('levelled_to_gravity'):
+    if g.get('user_up'):
+        print("  up axis supplied by hand; no fit was used")
+    elif g.get('levelled_to_gravity'):
         print("  fitted tilt was %.4f deg — treated as level and snapped to the "
               "gravity axis" % g['fitted_tilt'])
         print("  (pass --ground sloped if the ground really is at that angle)")
@@ -457,8 +487,11 @@ def main():
                     help="'auto' (default) snaps a fitted tilt under 3 degrees to "
                          "the gravity axis and keeps anything larger; 'level' always "
                          "snaps; 'sloped' always trusts the fit")
+    ap.add_argument('--up', nargs=3, type=float, default=None, metavar=('X','Y','Z'),
+                    help='force the up axis in capture space, bypassing the fit. '
+                         'Use when the solve is not gravity-aligned.')
     args = ap.parse_args()
-    report(analyze(args.ply, percent=args.percent, ground=args.ground))
+    report(analyze(args.ply, percent=args.percent, ground=args.ground, up_axis=args.up))
 
 
 if __name__ == '__main__':

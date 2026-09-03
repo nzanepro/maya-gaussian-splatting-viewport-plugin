@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
           scale=1.0, splat_scale=1.0, ref_size=None, ref_name='ref',
-          ground='auto'):
+          ground='auto', up_axis=None):
     import maya.standalone
     maya.standalone.initialize(name='python')
     import maya.cmds as cmds
@@ -25,7 +25,7 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
     import analyze_splat_ply as A
 
     print("[review] analysing %s" % ply)
-    res = A.analyze(ply, percent=percent, ground=ground)
+    res = A.analyze(ply, percent=percent, ground=ground, up_axis=up_axis)
     A.report(res)
     g, s, b = res['ground'], res['shell'], res['box']
 
@@ -86,7 +86,13 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
     hi = np.percentile(lev, 100.0 - box_trim, axis=0)
     # Anchor the base on the ground rather than on a percentile, and drop a
     # little below it so the ground splats themselves are kept.
-    base = min(0.0, float(lo[1]))
+    # Anchor the base on the ground plane itself, not on a percentile of the
+    # heights. Captures pick up geometry *below* the floor -- reflections in a
+    # polished floor, or a second inner background sphere -- and on the Hiller
+    # interior that is 16% of the splats sitting 2.8 units under it. A
+    # percentile base drops the box down to swallow all of that; the plane does
+    # not move. A small margin keeps the floor splats themselves.
+    base = -0.02 * float(hi[1] - lo[1])
     top = float(hi[1])
     bsize = np.array([hi[0] - lo[0], top - base, hi[2] - lo[2]])
     bcentre = np.array([(lo[0] + hi[0]) / 2.0, (base + top) / 2.0, (lo[2] + hi[2]) / 2.0])
@@ -141,14 +147,17 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
     up4 /= np.linalg.norm(up4)
     tilt = math.degrees(math.acos(min(1.0, max(-1.0, float(up4[1])))))
 
-    ground_y = float(np.percentile(w[:, 1], 1))
+    # Measure the floor as the densest height slab, not the 1st percentile:
+    # sub-floor reflections make a percentile read far below the real floor.
+    hist, edges = np.histogram(w[:, 1], bins=400)
+    ground_y = float(edges[int(np.argmax(hist))])
     print("\n[review] rig check")
     print("  scene 'up' maps to      : [%+.4f %+.4f %+.4f]  (%.4f deg off world +Y)"
           % (*up4, tilt))
-    print("  ground sits at Y        : %+.4f  (p1 of splat heights)" % ground_y)
+    print("  ground sits at Y        : %+.4f  (densest height slab)" % ground_y)
     print("  splat heights p50 / p99 : %+.4f / %+.4f" % (np.percentile(w[:, 1], 50),
                                                          np.percentile(w[:, 1], 99)))
-    above = float((w[:, 1] > ground_y).mean())
+    above = float((w[:, 1] > ground_y - 0.05 * abs(top - base)).mean())
     print("  %.1f%% of splats above the ground" % (100 * above))
 
     # The cull box must share the splats' frame, or it crops the wrong region.
@@ -270,6 +279,7 @@ if __name__ == '__main__':
     ap.add_argument('--ref-name', default='ref', dest='ref_name')
     ap.add_argument('--ground', choices=('auto', 'level', 'sloped'), default='auto',
                     help="see analyze_splat_ply.py --ground")
+    ap.add_argument('--up', nargs=3, type=float, default=None, metavar=('X','Y','Z'))
     a = ap.parse_args()
     build(a.ply, a.out, a.plugin, a.percent, a.display_percent, a.box_trim,
-          a.scale, a.splat_scale, a.ref_size, a.ref_name, a.ground)
+          a.scale, a.splat_scale, a.ref_size, a.ref_name, a.ground, a.up)
