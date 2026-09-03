@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def build(ply, out, plugin, percent=10.0, display_percent=100.0):
+def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     import maya.standalone
     maya.standalone.initialize(name='python')
     import maya.cmds as cmds
@@ -37,7 +37,11 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
     #   flip  : 180 about X when the capture is upside down (Polycam is Y-down)
     #   level : undo the measured ground tilt
     #   shift : bring the ground plane to Y = 0
-    flip = cmds.group(empty=True, name="splat_flip_GRP")
+    # A single root above everything, including the cull box, so a unit-scale
+    # correction can be dialled in on one node without the box drifting out of
+    # register with the splats.
+    root = cmds.group(empty=True, name="splat_root_GRP")
+    flip = cmds.group(empty=True, name="splat_flip_GRP", parent=root)
     if g['upside_down']:
         cmds.setAttr(flip + ".rotateX", 180.0)
     level = cmds.group(empty=True, name="splat_level_GRP", parent=flip)
@@ -53,12 +57,37 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
     cmds.setAttr(shape + ".displayPercent", display_percent)
     cmds.setAttr(shape + ".cullEnabled", 1)
 
-    # ---- cull cube, in the splat's own (unlevelled) space -------------------
-    # It is parented under the same rig so it travels with the data; its scale
-    # is the p0.5..p99.5 extent of the core, i.e. the good data minus the
-    # background sphere.
+    # ---- cull cube, aligned to the ground ---------------------------------
+    # Built in levelled world space and left at the scene root, so its axes are
+    # the ground's axes: the base sits on the ground and it rises from there,
+    # rather than being an axis-aligned box in the capture's tilted frame.
+    # The plug-in composes the splat's own world matrix, so the box is free to
+    # live anywhere in the outliner.
+    #
+    # X and Z span the trimmed extent of the good data; `box_trim` is the
+    # percentile cut at each end, so the default 0.5 keeps the middle 99% and
+    # discards floaters that would otherwise inflate the box enormously.
+    rig = np.array(cmds.getAttr(shape + ".worldMatrix[0]")).reshape(4, 4)
+    pts = A.read_positions(ply)[::37]
+    pts = pts[np.linalg.norm(pts - np.median(pts, axis=0), axis=1) <= s['cut']]
+    lev = (np.hstack([pts, np.ones((len(pts), 1))]) @ rig)[:, :3]
+
+    lo = np.percentile(lev, box_trim, axis=0)
+    hi = np.percentile(lev, 100.0 - box_trim, axis=0)
+    # Anchor the base on the ground rather than on a percentile, and drop a
+    # little below it so the ground splats themselves are kept.
+    base = min(0.0, float(lo[1]))
+    top = float(hi[1])
+    bsize = np.array([hi[0] - lo[0], top - base, hi[2] - lo[2]])
+    bcentre = np.array([(lo[0] + hi[0]) / 2.0, (base + top) / 2.0, (lo[2] + hi[2]) / 2.0])
+    print("[review] cull box (levelled world): base Y %+.4f  top Y %+.4f" % (base, top))
+
     cube = cmds.polyCube(name="X29_cullBox", w=1, h=1, d=1, ch=False)[0]
-    _adopt(cube, shift, t=b['centre'], s=b['size'])
+    cmds.parent(cube, root, relative=True)
+    for ax, tv, sv in zip("XYZ", bcentre, bsize):
+        cmds.setAttr(cube + ".translate" + ax, float(tv))
+        cmds.setAttr(cube + ".rotate" + ax, 0.0)
+        cmds.setAttr(cube + ".scale" + ax, float(sv))
     _wire(cube)
     cmds.connectAttr(cube + ".worldMatrix[0]", shape + ".cullBoxMatrix", force=True)
 
@@ -111,15 +140,19 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
 
     # The cull box must share the splats' frame, or it crops the wrong region.
     cmw = np.array(cmds.getAttr(cube + ".worldMatrix[0]")).reshape(4, 4)
-    def _basis(m):
-        a = m[:3, :3].astype(float).copy()
+    def _basis(mm):
+        a = mm[:3, :3].astype(float).copy()
         for i in range(3):
             ln = np.linalg.norm(a[i])
             if ln > 1e-9:
                 a[i] /= ln
         return a
-    aligned = bool(np.allclose(_basis(cmw), _basis(m), atol=1e-3))
-    print("  cull box shares the splat frame : %s" % aligned)
+    # The box is deliberately aligned to levelled world space, not to the
+    # capture's tilted frame, so its base lies flat on the ground.
+    aligned = bool(np.allclose(_basis(cmw), np.eye(3), atol=1e-3))
+    print("  cull box is level with the ground: %s" % aligned)
+    print("  box base Y / top Y               : %+.4f / %+.4f"
+          % (cmw[3, 1] - cmw[1, 1] / 2.0, cmw[3, 1] + cmw[1, 1] / 2.0))
 
     # And it must actually contain the bulk of the data.
     inv = np.linalg.inv(cmw)
@@ -187,5 +220,8 @@ if __name__ == '__main__':
                     help='fraction of splats used for the analysis')
     ap.add_argument('--display-percent', type=float, default=100.0,
                     help='initial displayPercent on the node')
+    ap.add_argument('--box-trim', type=float, default=0.5, dest='box_trim',
+                    help='percentile trimmed from each end when sizing the cull '
+                         'box (default 0.5, i.e. keep the middle 99%%)')
     a = ap.parse_args()
-    build(a.ply, a.out, a.plugin, a.percent, a.display_percent)
+    build(a.ply, a.out, a.plugin, a.percent, a.display_percent, a.box_trim)
