@@ -15,7 +15,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
+def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5,
+          scale=1.0, splat_scale=1.0, ref_size=None, ref_name='ref'):
     import maya.standalone
     maya.standalone.initialize(name='python')
     import maya.cmds as cmds
@@ -41,6 +42,8 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     # correction can be dialled in on one node without the box drifting out of
     # register with the splats.
     root = cmds.group(empty=True, name="splat_root_GRP")
+    for ax in "XYZ":
+        cmds.setAttr(root + ".scale" + ax, float(scale))
     flip = cmds.group(empty=True, name="splat_flip_GRP", parent=root)
     if g['upside_down']:
         cmds.setAttr(flip + ".rotateX", 180.0)
@@ -55,6 +58,7 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     xform = cmds.listRelatives(shape, parent=True, fullPath=False)[0]
     cmds.setAttr(shape + ".filePath", ply, type="string")
     cmds.setAttr(shape + ".displayPercent", display_percent)
+    cmds.setAttr(shape + ".splatScale", float(splat_scale))
     cmds.setAttr(shape + ".cullEnabled", 1)
 
     # ---- cull cube, aligned to the ground ---------------------------------
@@ -67,7 +71,12 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     # X and Z span the trimmed extent of the good data; `box_trim` is the
     # percentile cut at each end, so the default 0.5 keeps the middle 99% and
     # discards floaters that would otherwise inflate the box enormously.
-    rig = np.array(cmds.getAttr(shape + ".worldMatrix[0]")).reshape(4, 4)
+    # The cull box is a child of root, so its transform values live in root's
+    # child space. Divide the root out of the splat's world matrix, or the box
+    # is authored in already-scaled coordinates and root scales it a second time.
+    rootW = np.array(cmds.getAttr(root + ".worldMatrix[0]")).reshape(4, 4)
+    rig = (np.array(cmds.getAttr(shape + ".worldMatrix[0]")).reshape(4, 4)
+           @ np.linalg.inv(rootW))
     pts = A.read_positions(ply)[::37]
     pts = pts[np.linalg.norm(pts - np.median(pts, axis=0), axis=1) <= s['cut']]
     lev = (np.hstack([pts, np.ones((len(pts), 1))]) @ rig)[:, :3]
@@ -118,7 +127,10 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     # Checking the transformed normal alone is ambiguous: the body sits on the
     # -n side, so a correct rig sends n to -Y, which reads like a failure. Push
     # actual splats through the world matrix instead and look at where they land.
-    m = np.array(cmds.getAttr(shape + ".worldMatrix[0]")).reshape(4, 4)
+    # Checks run in root-child space (scale divided out) so the tolerances below
+    # are in PLY units and stay meaningful whatever --scale is.
+    m = (np.array(cmds.getAttr(shape + ".worldMatrix[0]")).reshape(4, 4)
+         @ np.linalg.inv(rootW))
     pts = A.read_positions(ply)[::997]
     core = pts[np.linalg.norm(pts - np.median(pts, axis=0), axis=1) <= s['cut']]
     w = (np.hstack([core, np.ones((len(core), 1))]) @ m)[:, :3]
@@ -139,7 +151,8 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     print("  %.1f%% of splats above the ground" % (100 * above))
 
     # The cull box must share the splats' frame, or it crops the wrong region.
-    cmw = np.array(cmds.getAttr(cube + ".worldMatrix[0]")).reshape(4, 4)
+    cmw = (np.array(cmds.getAttr(cube + ".worldMatrix[0]")).reshape(4, 4)
+           @ np.linalg.inv(rootW))
     def _basis(mm):
         a = mm[:3, :3].astype(float).copy()
         for i in range(3):
@@ -174,6 +187,26 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0, box_trim=0.5):
     ok = (tilt < 0.5 and abs(ground_y) < 0.25 and above > 0.9 and aligned
           and frac > 0.9 and abs(shader_frac - frac) < 1e-6)
     print("  -> %s" % ("LEVELLED, UPRIGHT, BOX ALIGNED" if ok else "RIG IS WRONG"))
+
+    # ---- scale reference ---------------------------------------------------
+    # A box of known real-world size, to calibrate `scale` against by eye. The
+    # capture covers the whole space rather than just the subject, so picking
+    # the subject out of the statistics is unreliable; comparing it to a
+    # correctly sized box is not.
+    if ref_size:
+        ref = cmds.polyCube(name=ref_name + "_sizeRef", w=1, h=1, d=1, ch=False)[0]
+        for ax, v in zip("XYZ", ref_size):
+            cmds.setAttr(ref + ".scale" + ax, float(v))
+        cmds.setAttr(ref + ".translateY", float(ref_size[1]) / 2.0)  # stand it on the ground
+        _wire(ref)
+        print("[review] size reference %s: %.2f x %.2f x %.2f cm"
+              % (ref, ref_size[0], ref_size[1], ref_size[2]))
+
+    # Report the scene at the chosen scale so the number can be sanity-checked
+    # against something known without opening Maya.
+    print("[review] at scale %g (cm per PLY unit) the cropped scene measures "
+          "%.2f x %.2f x %.2f m" % (scale, bsize[0] * scale / 100.0,
+                                    bsize[1] * scale / 100.0, bsize[2] * scale / 100.0))
 
     cmds.select(clear=True)
     cmds.file(rename=out)
@@ -223,5 +256,17 @@ if __name__ == '__main__':
     ap.add_argument('--box-trim', type=float, default=0.5, dest='box_trim',
                     help='percentile trimmed from each end when sizing the cull '
                          'box (default 0.5, i.e. keep the middle 99%%)')
+    ap.add_argument('--scale', type=float, default=1.0,
+                    help='centimetres per PLY unit, applied to splat_root_GRP. '
+                         'Polycam exports are not reliably metric; calibrate '
+                         'against --ref-size rather than assuming.')
+    ap.add_argument('--splat-scale', type=float, default=1.0, dest='splat_scale',
+                    help='initial splatScale on the node')
+    ap.add_argument('--ref-size', nargs=3, type=float, default=None, dest='ref_size',
+                    metavar=('W', 'H', 'D'),
+                    help='build a wireframe box of this real size in cm, standing '
+                         'on the ground, to calibrate --scale against by eye')
+    ap.add_argument('--ref-name', default='ref', dest='ref_name')
     a = ap.parse_args()
-    build(a.ply, a.out, a.plugin, a.percent, a.display_percent, a.box_trim)
+    build(a.ply, a.out, a.plugin, a.percent, a.display_percent, a.box_trim,
+          a.scale, a.splat_scale, a.ref_size, a.ref_name)
