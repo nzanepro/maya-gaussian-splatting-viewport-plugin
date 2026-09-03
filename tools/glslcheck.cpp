@@ -78,7 +78,8 @@ int main(int argc, char** argv) {
     const char* uniforms[] = {
         "u_wvm","u_pm","u_splatScale","u_opacityMult","u_viewport","u_shDegree",
         "u_restFloatsPerSplat","u_sRGBToLinear","u_gamma","u_camPos",
-        "u_posTex","u_rotTex","u_sclTex","u_shTex","u_shRestTex"
+        "u_posTex","u_rotTex","u_sclTex","u_shTex","u_shRestTex",
+        "u_cullEnabled","u_cullBoxInv","u_cullInvert","u_displayStride"
     };
     int missing = 0;
     printf("Uniform locations:\n");

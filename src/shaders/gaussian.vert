@@ -59,6 +59,17 @@ uniform int   u_sRGBToLinear;        // non-zero → apply pow(color, 2.2) after
 uniform float u_gamma;               // always-on display gamma: pow(color, 1/gamma). 1.0 = no-op, >1 brightens
 uniform vec3  u_camPos;              // camera position in world space
 
+// Cull box: an oriented crop volume. u_cullBoxInv maps world space into the
+// box's local space, where the box is the unit cube centred on the origin —
+// which is exactly what a default 1x1x1 Maya cube's inverse world matrix
+// gives, so translate/rotate/scale on that cube all work for free.
+uniform int   u_cullEnabled;         // 0 = no culling
+uniform mat4  u_cullBoxInv;          // world -> unit-cube space
+uniform int   u_cullInvert;          // 1 = keep what is OUTSIDE the box
+
+// Display thinning: draw only every Nth splat. 1 = all.
+uniform int   u_displayStride;
+
 out vec2  v_uv;
 out vec4  v_color;
 out float v_opacity;
@@ -98,16 +109,31 @@ void main() {
     float opac = sclOpac.w;
     vec3  dc   = fetchDC(splatIdx).xyz;
 
-    // 1. Transform to View Space
+    // 1. Reject before any real work: display thinning, then the cull box.
+    //    Rejection is the same trick the near-plane test below uses — park the
+    //    vertex outside the far clip plane so the triangle is never rasterised.
+    bool reject = false;
+
+    if (u_displayStride > 1 && (splatIdx % uint(u_displayStride)) != 0u) {
+        reject = true;
+    }
+
+    if (!reject && u_cullEnabled != 0) {
+        vec3 b = (u_cullBoxInv * vec4(pos, 1.0)).xyz;
+        bool inside = all(lessThanEqual(abs(b), vec3(0.5)));
+        reject = (inside == (u_cullInvert != 0));
+    }
+
+    // 2. Transform to View Space
     vec4 viewPos = u_wvm * vec4(pos, 1.0);
-    if (viewPos.z > -0.1) {
-        // Behind or too close — discard by placing outside far clip plane
+    if (reject || viewPos.z > -0.1) {
+        // Rejected, behind, or too close — discard past the far clip plane
         gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
         v_uv = vec2(0.0); v_color = vec4(0.0); v_opacity = 0.0;
         return;
     }
 
-    // 2. SH Color Evaluation
+    // 3. SH Color Evaluation
     vec3 color = C0 * dc;
 
     if (u_shDegree >= 1) {
@@ -174,7 +200,7 @@ void main() {
     // gamma < 1 darkens.
     color = pow(color, vec3(1.0 / u_gamma));
 
-    // 3. Covariance Projection (EWA splatting)
+    // 4. Covariance Projection (EWA splatting)
     mat3 R = quatToMat(rot);
     mat3 S = mat3(scl.x, 0.0, 0.0,  0.0, scl.y, 0.0,  0.0, 0.0, scl.z);
     mat3 Sigma = R * S * S * transpose(R);

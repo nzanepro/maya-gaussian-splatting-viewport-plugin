@@ -24,6 +24,10 @@ public:
     int     shDegree;
     bool    sRGBToLinear;
     float   gamma;
+    bool    cullEnabled;
+    bool    cullInvert;
+    float   cullBoxInv[16];   // world -> unit-cube space, Maya row-major
+    int     displayStride;    // draw every Nth splat; 1 = all
 };
 
 class GaussianDrawOverride : public MHWRender::MPxDrawOverride {

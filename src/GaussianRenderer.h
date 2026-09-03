@@ -30,7 +30,11 @@ public:
               int          shDegree,
               const float  camPos[3],
               bool         sRGBToLinear,
-              float        gamma);
+              float        gamma,
+              bool         cullEnabled,
+              bool         cullInvert,
+              const float  cullBoxInv[16],
+              int          displayStride);
 
     int loadedShDegree() const { return loadedShDegree_; }
 
@@ -79,6 +83,7 @@ private:
         GLint wvm = -1, pm = -1, splatScale = -1, opacityMult = -1;
         GLint viewport = -1, shDegree = -1, restFloatsPerSplat = -1, camPos = -1;
         GLint sRGBToLinear = -1, gamma = -1;
+        GLint cullEnabled = -1, cullBoxInv = -1, cullInvert = -1, displayStride = -1;
     } drawUniforms_;
     struct {
         GLint wvm = -1, numSplats = -1;
@@ -99,6 +104,8 @@ private:
     // Sort-on-move: skip dispatch when camera hasn't changed.
     float prevWVM_[16]   = {};
     bool  sortDirty_     = true; // force sort after new data upload
+    int   displayStride_ = 1;    // 4.1 path skips thinned splats in the index build
+    int   visibleCount_  = 0;    // instances actually drawn
 
     // Capability-selected render path. Assume the compute path until a GL
     // context exists and detectCapabilities() can ask; nothing touches GL

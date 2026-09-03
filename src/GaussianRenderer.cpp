@@ -250,6 +250,7 @@ void GaussianRenderer::uploadSplats(const SplatData& data) {
         hostPositions_ = data.positions;
         sortKeys_.resize(splatCount_);
         sortIdx_.resize(splatCount_);
+        visibleCount_ = splatCount_;   // until the first sortCPU refines it
     }
 
     MGlobal::displayInfo(MString("[GaussianSplat] Uploaded ") + splatCount_ + " splats"
@@ -281,20 +282,29 @@ void GaussianRenderer::sortCPU(const MMatrix& wvm) {
     const float m02 = f_wvm[0*4+2], m12 = f_wvm[1*4+2];
     const float m22 = f_wvm[2*4+2], m32 = f_wvm[3*4+2];
 
-    const int n = splatCount_;
+    // Thinned splats are dropped here rather than in the shader, so the sort
+    // shrinks with displayPercent instead of paying for splats never drawn.
+    const int n      = splatCount_;
+    const int stride = displayStride_ > 1 ? displayStride_ : 1;
     sortKeys_.resize(n);
     sortIdx_.resize(n);
-    for (int i = 0; i < n; ++i) {
+    int kept = 0;
+    for (int i = 0; i < n; i += stride) {
         const float* p = &hostPositions_[(size_t)i * 4];
         const float z = p[0]*m02 + p[1]*m12 + p[2]*m22 + m32;
-        sortKeys_[i] = depthToRadixKey(z);
-        sortIdx_[i]  = (uint32_t)i;
+        sortKeys_[kept] = depthToRadixKey(z);
+        sortIdx_[kept]  = (uint32_t)i;
+        ++kept;
     }
+    sortKeys_.resize(kept);
+    sortIdx_.resize(kept);
+    visibleCount_ = kept;
+    if (kept == 0) return;
 
     radixSortByKey(sortKeys_, sortIdx_, sortKeysTmp_, sortIdxTmp_);
 
     glBindBuffer(GL_ARRAY_BUFFER, indexBuf_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)n * sizeof(uint32_t), sortIdx_.data());
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)kept * sizeof(uint32_t), sortIdx_.data());
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -347,7 +357,7 @@ void GaussianRenderer::sort(const MMatrix& wvm) {
     }
 }
 
-void GaussianRenderer::draw(const MHWRender::MDrawContext& ctx, float splatScale, float opacityMult, int shDegree, const float camPos[3], bool sRGBToLinear, float gamma) {
+void GaussianRenderer::draw(const MHWRender::MDrawContext& ctx, float splatScale, float opacityMult, int shDegree, const float camPos[3], bool sRGBToLinear, float gamma, bool cullEnabled, bool cullInvert, const float cullBoxInv[16], int displayStride) {
     static std::once_flag glewOnce;
     std::call_once(glewOnce, []() {
         glewExperimental = GL_TRUE;
@@ -380,6 +390,13 @@ void GaussianRenderer::draw(const MHWRender::MDrawContext& ctx, float splatScale
     }
 
     if (!isReady()) return;
+
+    // The 4.1 path bakes the display thinning into its index list, so a change
+    // of stride has to rebuild it even if the camera has not moved.
+    if (displayStride != displayStride_) {
+        displayStride_ = displayStride;
+        sortDirty_     = true;
+    }
 
     if (drawProgram_ == 0) {
         MGlobal::displayError("[GaussianSplat] drawProgram_ is 0 — shaders failed to compile!");
@@ -417,6 +434,12 @@ void GaussianRenderer::draw(const MHWRender::MDrawContext& ctx, float splatScale
     glUniform1i(       drawUniforms_.sRGBToLinear,       sRGBToLinear ? 1 : 0);
     glUniform1f(       drawUniforms_.gamma,              gamma);
     glUniform3fv(      drawUniforms_.camPos,             1, camPos); // M2: precomputed in prepareForDraw
+    glUniform1i(       drawUniforms_.cullEnabled,   cullEnabled ? 1 : 0);
+    glUniform1i(       drawUniforms_.cullInvert,    cullInvert  ? 1 : 0);
+    glUniformMatrix4fv(drawUniforms_.cullBoxInv,    1, GL_FALSE, cullBoxInv);
+    // On the 4.1 path the thinned splats are already absent from the index
+    // list, so the shader test is a no-op there; the compute path relies on it.
+    glUniform1i(       drawUniforms_.displayStride, useCompute_ ? displayStride : 1);
 
     glBindVertexArray(vao_);
     if (useCompute_) {
@@ -444,7 +467,8 @@ void GaussianRenderer::draw(const MHWRender::MDrawContext& ctx, float splatScale
         glActiveTexture(GL_TEXTURE0);
     }
 
-    glDrawArraysInstanced(GL_TRIANGLES, 0, 6, splatCount_);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 6,
+                          useCompute_ ? splatCount_ : visibleCount_);
 
     // Check for GL errors after draw
     GLenum glErr = glGetError();
@@ -537,6 +561,10 @@ void GaussianRenderer::buildShaderProgram() {
             drawUniforms_.sRGBToLinear       = glGetUniformLocation(drawProgram_, "u_sRGBToLinear");
             drawUniforms_.gamma              = glGetUniformLocation(drawProgram_, "u_gamma");
             drawUniforms_.camPos             = glGetUniformLocation(drawProgram_, "u_camPos");
+            drawUniforms_.cullEnabled        = glGetUniformLocation(drawProgram_, "u_cullEnabled");
+            drawUniforms_.cullBoxInv         = glGetUniformLocation(drawProgram_, "u_cullBoxInv");
+            drawUniforms_.cullInvert         = glGetUniformLocation(drawProgram_, "u_cullInvert");
+            drawUniforms_.displayStride      = glGetUniformLocation(drawProgram_, "u_displayStride");
             // Present only on the GL 4.1 path; -1 elsewhere, which glUniform1i ignores.
             texUniforms_.pos    = glGetUniformLocation(drawProgram_, "u_posTex");
             texUniforms_.rot    = glGetUniformLocation(drawProgram_, "u_rotTex");

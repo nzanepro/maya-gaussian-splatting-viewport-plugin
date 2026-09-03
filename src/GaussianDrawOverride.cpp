@@ -6,7 +6,9 @@
 #include <maya/MGlobal.h>
 #include <maya/MMatrix.h>
 #include <maya/MPoint.h>
+#include <maya/MFnMatrixData.h>
 #include <algorithm>
+#include <cmath>
 
 MHWRender::MPxDrawOverride* GaussianDrawOverride::creator(const MObject& obj) {
     MGlobal::displayInfo("[GaussianSplat] GaussianDrawOverride::creator called.");
@@ -64,6 +66,33 @@ MUserData* GaussianDrawOverride::prepareForDraw(
     data->shDegree     = std::min(requestedDeg, gNode->splatData.shDegree);
     data->sRGBToLinear = fn.findPlug(GaussianNode::aSRGBToLinear, false).asBool();
     data->gamma        = fn.findPlug(GaussianNode::aGamma,        false).asFloat();
+    data->cullEnabled  = fn.findPlug(GaussianNode::aCullEnabled,  false).asBool();
+    data->cullInvert   = fn.findPlug(GaussianNode::aCullInvert,   false).asBool();
+
+    // displayPercent is a percentage; the shader wants a stride. 100% -> 1.
+    float pct = fn.findPlug(GaussianNode::aDisplayPercent, false).asFloat();
+    if (pct <= 0.0f)  pct = 0.1f;
+    if (pct > 100.0f) pct = 100.0f;
+    data->displayStride = std::max(1, (int)llround(100.0 / (double)pct));
+
+    // The box is authored as a transform, so invert its world matrix here and
+    // hand the shader a straight world -> unit-cube mapping.
+    MMatrix boxInv;   // identity unless a box is connected
+    if (data->cullEnabled) {
+        MObject mtxObj;
+        MPlug   mp = fn.findPlug(GaussianNode::aCullBoxMatrix, false);
+        if (mp.getValue(mtxObj) == MS::kSuccess) {
+            MFnMatrixData mfd(mtxObj);
+            MMatrix boxWorld = mfd.matrix();
+            // A singular matrix (zero scale on an axis) would blow up the
+            // inverse and cull everything; fall back to no culling instead.
+            if (std::abs(boxWorld.det4x4()) > 1e-12) boxInv = boxWorld.inverse();
+            else data->cullEnabled = false;
+        }
+    }
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            data->cullBoxInv[i*4 + j] = (float)boxInv[i][j];
 
     // M2: compute camera world position here (one inverse per frame, not per draw call).
     MMatrix wvm  = ctx.getMatrix(MHWRender::MFrameContext::kWorldViewMtx);
@@ -104,7 +133,11 @@ void GaussianDrawOverride::draw(const MHWRender::MDrawContext& ctx, const MUserD
         gData->shDegree,
         gData->camPos,
         gData->sRGBToLinear,
-        gData->gamma
+        gData->gamma,
+        gData->cullEnabled,
+        gData->cullInvert,
+        gData->cullBoxInv,
+        gData->displayStride
     );
 
     if (!blendEnabled) glDisable(GL_BLEND);

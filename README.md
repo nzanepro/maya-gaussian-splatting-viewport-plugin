@@ -12,7 +12,9 @@ in Autodesk Maya Viewport 2.0.
 - EWA Splatting: full GPU projection of 3D covariance to 2D ellipses
 - Depth sort skipped when the camera is static; GPU bitonic sort on OpenGL 4.3, CPU radix sort on the 4.1 fallback
 - Maya scene integration: Reversed-Z depth test compatible, non-destructive
-- Maya node attributes: `filePath`, `splatScale`, `opacityMult`, `shDegree`, `sRGBToLinear`, `gamma`
+- Oriented cull box driven by any Maya transform, plus display thinning by percentage
+- Automatic detection of the background sphere projection and the ground plane (`tools/`)
+- Maya node attributes: `filePath`, `splatScale`, `opacityMult`, `shDegree`, `sRGBToLinear`, `gamma`, `cullEnabled`, `cullBoxMatrix`, `cullInvert`, `displayPercent`
 
 ## Requirements
 
@@ -129,6 +131,16 @@ Adjustable attributes:
   `pow(color, 2.2)` after SH evaluation, undoing the sRGB encoding most
   3DGS training pipelines bake into the SH coefficients. Turn off when
   your Maya viewport is not in linear-workflow mode.
+- `cullEnabled` / `cullBoxMatrix` / `cullInvert` — crop to a box. Connect any
+  transform's `worldMatrix[0]` into `cullBoxMatrix`; the node inverts it and
+  treats the box as the unit cube on the origin, so a default 1×1×1 Maya cube
+  maps 1:1 and its translate/rotate/scale manipulators all work. The test runs
+  in the vertex shader, so it updates live while you drag the box and costs
+  nothing per frame. `cullInvert` keeps what is *outside* the box instead.
+- `displayPercent` — draw only a fraction of the splats, `0.1`–`100` (default
+  `100`). `10` draws every 10th. Striding is spatially uniform on real captures,
+  and on the OpenGL 4.1 path the thinned splats are dropped before the depth
+  sort, so the sort shrinks proportionally too.
 - `gamma` — display-gamma curve, `0.1`–`5.0` (default `1.0`). Independent
   of `sRGBToLinear`; the shader applies `pow(color, 1/gamma)` on top of
   the sRGB stage. Values above `1.0` brighten, values below `1.0` darken.

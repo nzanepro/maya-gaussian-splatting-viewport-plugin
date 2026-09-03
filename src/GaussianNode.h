@@ -17,6 +17,10 @@ public:
     static MObject  aShDegree;
     static MObject  aSRGBToLinear;
     static MObject  aGamma;
+    static MObject  aCullEnabled;
+    static MObject  aCullBoxMatrix;
+    static MObject  aCullInvert;
+    static MObject  aDisplayPercent;
 
     SplatData       splatData;
     bool            dirty = true;

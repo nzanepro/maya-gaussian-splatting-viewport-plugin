@@ -1,6 +1,7 @@
 #include "GaussianNode.h"
 #include <maya/MFnTypedAttribute.h>
 #include <maya/MFnNumericAttribute.h>
+#include <maya/MFnMatrixAttribute.h>
 #include <maya/MFnStringData.h>
 #include <maya/MGlobal.h>
 #include <maya/MBoundingBox.h>
@@ -20,6 +21,10 @@ MObject GaussianNode::aOpacityMult;
 MObject GaussianNode::aShDegree;
 MObject GaussianNode::aSRGBToLinear;
 MObject GaussianNode::aGamma;
+MObject GaussianNode::aCullEnabled;
+MObject GaussianNode::aCullBoxMatrix;
+MObject GaussianNode::aCullInvert;
+MObject GaussianNode::aDisplayPercent;
 
 void* GaussianNode::creator() {
     return new GaussianNode;
@@ -28,6 +33,7 @@ void* GaussianNode::creator() {
 MStatus GaussianNode::initialize() {
     MFnTypedAttribute   tAttr;
     MFnNumericAttribute nAttr;
+    MFnMatrixAttribute  mAttr;
     MFnStringData       strData;
 
     MObject defaultStr = strData.create("");
@@ -56,6 +62,32 @@ MStatus GaussianNode::initialize() {
     nAttr.setKeyable(true);
     nAttr.setMin(0.1); nAttr.setMax(5.0);
 
+    // --- Cull box -----------------------------------------------------------
+    // Connect any transform's worldMatrix[0] into cullBoxMatrix; the splat node
+    // inverts it and treats the box as the unit cube centred on the origin, so
+    // a default 1x1x1 Maya cube maps 1:1 and its translate/rotate/scale
+    // manipulators all work with no extra plumbing.
+    aCullEnabled = nAttr.create("cullEnabled", "cen", MFnNumericData::kBoolean, false);
+    nAttr.setKeyable(true);
+    nAttr.setNiceNameOverride("Cull To Box");
+
+    aCullBoxMatrix = mAttr.create("cullBoxMatrix", "cbm", MFnMatrixAttribute::kDouble);
+    mAttr.setStorable(true);
+    mAttr.setConnectable(true);
+    mAttr.setNiceNameOverride("Cull Box Matrix");
+
+    aCullInvert = nAttr.create("cullInvert", "cinv", MFnNumericData::kBoolean, false);
+    nAttr.setKeyable(true);
+    nAttr.setNiceNameOverride("Invert Cull");
+
+    // Draw only every Nth splat. Cheap way to keep a multi-million-splat scene
+    // interactive while framing; on the OpenGL 4.1 path it also shrinks the
+    // CPU depth sort proportionally.
+    aDisplayPercent = nAttr.create("displayPercent", "dpc", MFnNumericData::kFloat, 100.0);
+    nAttr.setKeyable(true);
+    nAttr.setMin(0.1); nAttr.setMax(100.0);
+    nAttr.setNiceNameOverride("Display Percent");
+
     MStatus s;
     s = addAttribute(aFilePath);      CHECK_MSTATUS_AND_RETURN_IT(s);
     s = addAttribute(aSplatScale);    CHECK_MSTATUS_AND_RETURN_IT(s);
@@ -63,6 +95,10 @@ MStatus GaussianNode::initialize() {
     s = addAttribute(aShDegree);      CHECK_MSTATUS_AND_RETURN_IT(s);
     s = addAttribute(aSRGBToLinear);  CHECK_MSTATUS_AND_RETURN_IT(s);
     s = addAttribute(aGamma);         CHECK_MSTATUS_AND_RETURN_IT(s);
+    s = addAttribute(aCullEnabled);    CHECK_MSTATUS_AND_RETURN_IT(s);
+    s = addAttribute(aCullBoxMatrix);  CHECK_MSTATUS_AND_RETURN_IT(s);
+    s = addAttribute(aCullInvert);     CHECK_MSTATUS_AND_RETURN_IT(s);
+    s = addAttribute(aDisplayPercent); CHECK_MSTATUS_AND_RETURN_IT(s);
 
     return MS::kSuccess;
 }

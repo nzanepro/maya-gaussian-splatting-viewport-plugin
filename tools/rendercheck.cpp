@@ -92,25 +92,65 @@ int main(int argc, char** argv){
     glActiveTexture(GL_TEXTURE0);
 
     glViewport(0,0,W,H);
-    glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
     glEnable(GL_BLEND); glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
-    glDrawArraysInstanced(GL_TRIANGLES,0,6,N);
 
-    GLenum err=glGetError();
-    std::vector<unsigned char> px(W*H*4);
-    glReadPixels(0,0,W,H,GL_RGBA,GL_UNSIGNED_BYTE,px.data());
+    GLint uCullEn = glGetUniformLocation(prog,"u_cullEnabled");
+    GLint uCullIv = glGetUniformLocation(prog,"u_cullInvert");
+    GLint uCullM  = glGetUniformLocation(prog,"u_cullBoxInv");
+    GLint uStride = glGetUniformLocation(prog,"u_displayStride");
 
-    long lit=0; int mr=0,mg=0,mb=0;
-    for(int i=0;i<W*H;++i){ if(px[i*4]|px[i*4+1]|px[i*4+2]) ++lit;
-        mr=std::max(mr,(int)px[i*4]); mg=std::max(mg,(int)px[i*4+1]); mb=std::max(mb,(int)px[i*4+2]); }
-    const unsigned char* c=&px[(H/2*W+W/2)*4];
+    struct Res { GLenum err; long lit; int mr,mg,mb; };
+    auto pass_draw = [&](int cullEnabled, int cullInvert, const float* boxInv, int stride){
+        glUniform1i(uCullEn, cullEnabled);
+        glUniform1i(uCullIv, cullInvert);
+        glUniform1i(uStride, stride);
+        if (boxInv) glUniformMatrix4fv(uCullM, 1, GL_FALSE, boxInv);
+        glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArraysInstanced(GL_TRIANGLES,0,6,N);
+        Res r{}; r.err = glGetError();
+        std::vector<unsigned char> px(W*H*4);
+        glReadPixels(0,0,W,H,GL_RGBA,GL_UNSIGNED_BYTE,px.data());
+        for(int i=0;i<W*H;++i){ if(px[i*4]|px[i*4+1]|px[i*4+2]) ++r.lit;
+            r.mr=std::max(r.mr,(int)px[i*4]); r.mg=std::max(r.mg,(int)px[i*4+1]);
+            r.mb=std::max(r.mb,(int)px[i*4+2]); }
+        return r;
+    };
 
-    printf("GL error after draw : 0x%x %s\n",err,err?"<-- PROBLEM":"(none)");
-    printf("lit pixels          : %ld / %d\n",lit,W*H);
-    printf("max channel R/G/B   : %d / %d / %d\n",mr,mg,mb);
-    printf("center pixel RGBA   : %d %d %d %d\n",c[0],c[1],c[2],c[3]);
-    bool pass = (err==0) && lit>50 && mr>40 && mg>40 && mb>40;
-    printf("\n%s\n", pass?"RESULT: PASS — all three splats rendered through the 4.1 path"
+    // Splat 0 is red at the origin, 1 is green at x=+0.6, 2 is blue at x=-0.6.
+    // A unit cube scaled to 0.5 about the origin therefore contains only red.
+    // Its inverse world matrix is diag(2,2,2,1), written Maya row-major and
+    // uploaded with GL_FALSE exactly as GaussianDrawOverride does.
+    const float boxInv[16] = {2,0,0,0, 0,2,0,0, 0,0,2,0, 0,0,0,1};
+
+    Res all   = pass_draw(0,0,boxInv,1);
+    Res inside= pass_draw(1,0,boxInv,1);
+    Res outsd = pass_draw(1,1,boxInv,1);
+    Res thin  = pass_draw(0,0,boxInv,2);   // every 2nd splat -> drops green
+
+    printf("no cull      : err 0x%x  lit %5ld  RGB %3d/%3d/%3d\n", all.err,all.lit,all.mr,all.mg,all.mb);
+    printf("cull to box  : err 0x%x  lit %5ld  RGB %3d/%3d/%3d   (expect red only)\n",
+           inside.err,inside.lit,inside.mr,inside.mg,inside.mb);
+    printf("cull inverted: err 0x%x  lit %5ld  RGB %3d/%3d/%3d   (expect green+blue)\n",
+           outsd.err,outsd.lit,outsd.mr,outsd.mg,outsd.mb);
+    printf("stride 2     : err 0x%x  lit %5ld  RGB %3d/%3d/%3d   (expect red+blue)\n",
+           thin.err,thin.lit,thin.mr,thin.mg,thin.mb);
+
+    // 3DGS evaluates colour as C0*dc + 0.5, so a channel with dc=0 still lands
+    // at ~0.5 (127/255). "Present" therefore means clearly above that floor,
+    // not near zero.
+    const int HI = 200, LO = 160;
+    // With all three overlapping, each colour is diluted by the others, so the
+    // bar here is only "clearly above the 0.5 floor".
+    bool ok_all    = all.err==0 && all.lit>50 && all.mr>LO && all.mg>LO && all.mb>LO;
+    bool ok_inside = inside.err==0 && inside.mr>HI && inside.mg<LO && inside.mb<LO;
+    bool ok_outsd  = outsd.err==0  && outsd.mr<LO  && outsd.mg>HI && outsd.mb>HI;
+    bool ok_thin   = thin.err==0   && thin.mr>HI   && thin.mg<LO  && thin.mb>HI;
+    printf("\n  all three render        : %s\n", ok_all?"PASS":"FAIL");
+    printf("  cull keeps inside only  : %s\n", ok_inside?"PASS":"FAIL");
+    printf("  invert keeps outside    : %s\n", ok_outsd?"PASS":"FAIL");
+    printf("  stride drops every 2nd  : %s\n", ok_thin?"PASS":"FAIL");
+    bool pass = ok_all && ok_inside && ok_outsd && ok_thin;
+    printf("\n%s\n", pass?"RESULT: PASS — 4.1 path, cull box and display stride all correct"
                         :"RESULT: FAILED");
     return pass?0:1;
 }
