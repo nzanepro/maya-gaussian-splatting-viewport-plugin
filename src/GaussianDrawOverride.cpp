@@ -75,8 +75,15 @@ MUserData* GaussianDrawOverride::prepareForDraw(
     if (pct > 100.0f) pct = 100.0f;
     data->displayStride = std::max(1, (int)llround(100.0 / (double)pct));
 
-    // The box is authored as a transform, so invert its world matrix here and
-    // hand the shader a straight world -> unit-cube mapping.
+    // The shader tests each splat's OBJECT-space position — the raw coordinate
+    // out of the PLY — but the cull box is authored as a world-space transform.
+    // So the matrix handed over has to carry the splat's own world transform
+    // too, or a locator that has been moved, levelled or scaled culls against a
+    // box sitting somewhere else entirely.
+    //
+    // Maya is row-vector: p_world = p_object * splatWorld, and
+    // p_box = p_world * boxWorld^-1, so the combined map is
+    //     p_box = p_object * (splatWorld * boxWorld^-1)
     MMatrix boxInv;   // identity unless a box is connected
     if (data->cullEnabled) {
         MObject mtxObj;
@@ -86,8 +93,10 @@ MUserData* GaussianDrawOverride::prepareForDraw(
             MMatrix boxWorld = mfd.matrix();
             // A singular matrix (zero scale on an axis) would blow up the
             // inverse and cull everything; fall back to no culling instead.
-            if (std::abs(boxWorld.det4x4()) > 1e-12) boxInv = boxWorld.inverse();
-            else data->cullEnabled = false;
+            if (std::abs(boxWorld.det4x4()) > 1e-12)
+                boxInv = objPath.inclusiveMatrix() * boxWorld.inverse();
+            else
+                data->cullEnabled = false;
         }
     }
     for (int i = 0; i < 4; ++i)

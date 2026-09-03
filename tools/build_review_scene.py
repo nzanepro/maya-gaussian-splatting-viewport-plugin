@@ -127,7 +127,19 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
     frac = float((np.abs(local) <= 0.5).all(axis=1).mean())
     print("  splats inside the cull box      : %.1f%%" % (100 * frac))
 
-    ok = tilt < 0.5 and abs(ground_y) < 0.25 and above > 0.9 and aligned and frac > 0.9
+    # Reproduce the matrix GaussianDrawOverride hands the shader and confirm it
+    # agrees. The shader tests OBJECT-space positions, so the matrix has to be
+    # splatWorld * boxWorld^-1; feeding boxWorld^-1 alone culls everything the
+    # moment the splat node carries any transform of its own, which is exactly
+    # what a levelling rig gives it.
+    shader_local = (np.hstack([core, np.ones((len(core), 1))]) @ (m @ inv))[:, :3]
+    shader_frac = float((np.abs(shader_local) <= 0.5).all(axis=1).mean())
+    print("  same via the shader's matrix    : %.1f%%%s"
+          % (100 * shader_frac,
+             "" if abs(shader_frac - frac) < 1e-6 else "   <-- MISMATCH"))
+
+    ok = (tilt < 0.5 and abs(ground_y) < 0.25 and above > 0.9 and aligned
+          and frac > 0.9 and abs(shader_frac - frac) < 1e-6)
     print("  -> %s" % ("LEVELLED, UPRIGHT, BOX ALIGNED" if ok else "RIG IS WRONG"))
 
     cmds.select(clear=True)
