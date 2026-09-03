@@ -58,10 +58,7 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
     # is the p0.5..p99.5 extent of the core, i.e. the good data minus the
     # background sphere.
     cube = cmds.polyCube(name="X29_cullBox", w=1, h=1, d=1, ch=False)[0]
-    cmds.parent(cube, shift)
-    cmds.xform(cube, os=True, t=[float(v) for v in b['centre']])
-    for ax, v in zip("XYZ", b['size']):
-        cmds.setAttr(cube + ".scale" + ax, float(v))
+    _adopt(cube, shift, t=b['centre'], s=b['size'])
     _wire(cube)
     cmds.connectAttr(cube + ".worldMatrix[0]", shape + ".cullBoxMatrix", force=True)
 
@@ -69,26 +66,22 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
     made = []
     if s.get('found'):
         loc = cmds.spaceLocator(name="X29_sphereCentre")[0]
-        cmds.parent(loc, shift)
-        cmds.xform(loc, os=True, t=[float(v) for v in s['centre']])
+        _adopt(loc, shift, t=s['centre'])
         for ax in "XYZ":
             cmds.setAttr(loc + ".localScale" + ax, s['radius'] * 0.05)
         sph = cmds.polySphere(name="X29_shellFit", radius=float(s['radius']),
                               sx=24, sy=16, ch=False)[0]
-        cmds.parent(sph, shift)
-        cmds.xform(sph, os=True, t=[float(v) for v in s['centre']])
+        _adopt(sph, shift, t=s['centre'])
         _wire(sph)
         cmds.setAttr(sph + ".visibility", 0)   # on tap, off by default
         made += [loc, sph]
 
     ground = cmds.polyPlane(name="X29_groundFit", w=1, h=1, sx=1, sy=1, ch=False)[0]
-    cmds.parent(ground, shift)
     span = float(max(b['size'])) * 2.0
-    cmds.setAttr(ground + ".scaleX", span)
-    cmds.setAttr(ground + ".scaleZ", span)
-    cmds.setAttr(ground + ".translateY", g['y_at_origin'])
-    cmds.setAttr(ground + ".rotateX", g['rot_x'])
-    cmds.setAttr(ground + ".rotateZ", g['rot_z'])
+    _adopt(ground, shift,
+           t=(0.0, g['y_at_origin'], 0.0),
+           r=(g['rot_x'], 0.0, g['rot_z']),
+           s=(span, 1.0, span))
     _wire(ground)
     cmds.setAttr(ground + ".visibility", 0)
 
@@ -114,15 +107,53 @@ def build(ply, out, plugin, percent=10.0, display_percent=100.0):
     print("  splat heights p50 / p99 : %+.4f / %+.4f" % (np.percentile(w[:, 1], 50),
                                                          np.percentile(w[:, 1], 99)))
     above = float((w[:, 1] > ground_y).mean())
-    ok = tilt < 0.5 and abs(ground_y) < 0.25 and above > 0.9
     print("  %.1f%% of splats above the ground" % (100 * above))
-    print("  -> %s" % ("LEVELLED AND UPRIGHT" if ok else "RIG IS WRONG"))
+
+    # The cull box must share the splats' frame, or it crops the wrong region.
+    cmw = np.array(cmds.getAttr(cube + ".worldMatrix[0]")).reshape(4, 4)
+    def _basis(m):
+        a = m[:3, :3].astype(float).copy()
+        for i in range(3):
+            ln = np.linalg.norm(a[i])
+            if ln > 1e-9:
+                a[i] /= ln
+        return a
+    aligned = bool(np.allclose(_basis(cmw), _basis(m), atol=1e-3))
+    print("  cull box shares the splat frame : %s" % aligned)
+
+    # And it must actually contain the bulk of the data.
+    inv = np.linalg.inv(cmw)
+    local = (np.hstack([w, np.ones((len(w), 1))]) @ inv)[:, :3]
+    frac = float((np.abs(local) <= 0.5).all(axis=1).mean())
+    print("  splats inside the cull box      : %.1f%%" % (100 * frac))
+
+    ok = tilt < 0.5 and abs(ground_y) < 0.25 and above > 0.9 and aligned and frac > 0.9
+    print("  -> %s" % ("LEVELLED, UPRIGHT, BOX ALIGNED" if ok else "RIG IS WRONG"))
 
     cmds.select(clear=True)
     cmds.file(rename=out)
     cmds.file(save=True, type="mayaAscii", force=True)
     print("[review] wrote %s" % out)
     return out
+
+
+def _adopt(node, parent, t=(0, 0, 0), r=(0, 0, 0), s=(1, 1, 1)):
+    """Reparent into the levelling rig and set the local transform outright.
+
+    cmds.parent() preserves world position by default, which bakes the inverse
+    of the rig's rotation into the child. The child then keeps its original
+    world orientation while the splats are levelled, so a cull box authored in
+    splat space ends up axis-aligned to the world and crops the wrong region.
+    relative=True keeps the local values instead, and every channel is then set
+    explicitly so nothing is inherited by accident.
+    """
+    import maya.cmds as cmds
+    cmds.parent(node, parent, relative=True)
+    for ax, tv, rv, sv in zip("XYZ", t, r, s):
+        cmds.setAttr(node + ".translate" + ax, float(tv))
+        cmds.setAttr(node + ".rotate" + ax, float(rv))
+        cmds.setAttr(node + ".scale" + ax, float(sv))
+    return node
 
 
 def _wire(node):
