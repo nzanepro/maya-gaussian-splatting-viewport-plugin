@@ -174,6 +174,10 @@ absent. The renderer detects this on the first draw and falls back:
 define, so the EWA projection and SH evaluation cannot drift apart. The
 `#version` line is supplied by the loader rather than the file.
 
+The 4.1 path is confirmed working in Maya 2024 on macOS 26 / Apple M1.
+`tools/` holds checks that cover it without needing Maya open — see
+[tools/README.md](tools/README.md).
+
 The sort is single-threaded and its result is uploaded whenever the camera
 moves, where the Windows path keeps everything resident on the GPU. Measured on
 an M1 (depth transform plus radix sort, the whole per-move CPU cost):
