@@ -1,4 +1,4 @@
-#version 450
+// #version supplied by GaussianRenderer::loadShader.
 
 layout(local_size_x = 256) in;
 

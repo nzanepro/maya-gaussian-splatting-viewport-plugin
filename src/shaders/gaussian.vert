@@ -1,16 +1,52 @@
-#version 450
+// The #version line is supplied by GaussianRenderer::loadShader, which also
+// defines GS_USE_SSBO when the context can do OpenGL 4.3 shader storage
+// buffers. Everything below the data-access block is shared by both paths, so
+// the EWA projection and SH evaluation cannot drift between them.
+//
+// SH rest coefficients (degrees 1..3) are packed per splat either way:
+//   stride = u_restFloatsPerSplat = 9 (deg1) | 24 (deg2) | 45 (deg3)
+//   layout per splat: [Y_{1,-1}.rgb, Y_{1,0}.rgb, Y_{1,1}.rgb,
+//                      Y_{2,-2..2}.rgb,
+//                      Y_{3,-3..3}.rgb]
+
+#ifdef GS_USE_SSBO
 
 layout(std430, binding = 0) readonly buffer PosBuffer    { vec4 positions[]; };
 layout(std430, binding = 1) readonly buffer RotBuffer    { vec4 rotations[]; };
 layout(std430, binding = 2) readonly buffer SclBuffer    { vec4 scales[];    };
 layout(std430, binding = 3) readonly buffer SHBuffer     { vec4 sh_dc[];     };
 layout(std430, binding = 5) readonly buffer IndexBuffer  { uint indices[];   };
-// SH rest coefficients (degrees 1..3) packed per splat:
-//   stride = u_restFloatsPerSplat = 9 (deg1) | 24 (deg2) | 45 (deg3)
-//   layout per splat: [Y_{1,-1}.rgb, Y_{1,0}.rgb, Y_{1,1}.rgb,
-//                      Y_{2,-2..2}.rgb,
-//                      Y_{3,-3..3}.rgb]
 layout(std430, binding = 6) readonly buffer SHRestBuffer { float sh_rest[];  };
+
+uint  splatIndex()       { return indices[gl_InstanceID]; }
+vec4  fetchPos (uint i)  { return positions[i]; }
+vec4  fetchRot (uint i)  { return rotations[i]; }
+vec4  fetchScl (uint i)  { return scales[i];    }
+vec4  fetchDC  (uint i)  { return sh_dc[i];     }
+float fetchRest(uint i)  { return sh_rest[i];   }
+
+#else
+
+// OpenGL 4.1 has no shader storage buffers. The very same buffer objects are
+// exposed as texture buffers instead — texelFetch replaces the array read —
+// and the depth-sorted splat index arrives as an instanced vertex attribute
+// rather than an indexed read, because the sort now runs on the CPU.
+uniform samplerBuffer u_posTex;
+uniform samplerBuffer u_rotTex;
+uniform samplerBuffer u_sclTex;
+uniform samplerBuffer u_shTex;
+uniform samplerBuffer u_shRestTex; // R32F — one float per texel
+
+layout(location = 0) in uint a_splatIndex;
+
+uint  splatIndex()       { return a_splatIndex; }
+vec4  fetchPos (uint i)  { return texelFetch(u_posTex,    int(i)); }
+vec4  fetchRot (uint i)  { return texelFetch(u_rotTex,    int(i)); }
+vec4  fetchScl (uint i)  { return texelFetch(u_sclTex,    int(i)); }
+vec4  fetchDC  (uint i)  { return texelFetch(u_shTex,     int(i)); }
+float fetchRest(uint i)  { return texelFetch(u_shRestTex, int(i)).r; }
+
+#endif
 
 uniform mat4  u_wvm;
 uniform mat4  u_pm;
@@ -53,13 +89,14 @@ mat3 quatToMat(vec4 q) {
 }
 
 void main() {
-    uint splatIdx = indices[gl_InstanceID];
+    uint splatIdx = splatIndex();
 
-    vec3  pos  = positions[splatIdx].xyz;
-    vec4  rot  = rotations[splatIdx];
-    vec3  scl  = scales[splatIdx].xyz;
-    float opac = scales[splatIdx].w;
-    vec3  dc   = sh_dc[splatIdx].xyz;
+    vec4  sclOpac = fetchScl(splatIdx);
+    vec3  pos  = fetchPos(splatIdx).xyz;
+    vec4  rot  = fetchRot(splatIdx);
+    vec3  scl  = sclOpac.xyz;
+    float opac = sclOpac.w;
+    vec3  dc   = fetchDC(splatIdx).xyz;
 
     // 1. Transform to View Space
     vec4 viewPos = u_wvm * vec4(pos, 1.0);
@@ -79,9 +116,9 @@ void main() {
         float dx = dir.x, dy = dir.y, dz = dir.z;
         uint base = splatIdx * uint(u_restFloatsPerSplat);
 
-        vec3 sh1_0 = vec3(sh_rest[base+0], sh_rest[base+1], sh_rest[base+2]); // Y_{1,-1}
-        vec3 sh1_1 = vec3(sh_rest[base+3], sh_rest[base+4], sh_rest[base+5]); // Y_{1, 0}
-        vec3 sh1_2 = vec3(sh_rest[base+6], sh_rest[base+7], sh_rest[base+8]); // Y_{1, 1}
+        vec3 sh1_0 = vec3(fetchRest(base+0u), fetchRest(base+1u), fetchRest(base+2u)); // Y_{1,-1}
+        vec3 sh1_1 = vec3(fetchRest(base+3u), fetchRest(base+4u), fetchRest(base+5u)); // Y_{1, 0}
+        vec3 sh1_2 = vec3(fetchRest(base+6u), fetchRest(base+7u), fetchRest(base+8u)); // Y_{1, 1}
 
         color += (-C1 * dy) * sh1_0
                + ( C1 * dz) * sh1_1
@@ -91,11 +128,11 @@ void main() {
             float xx = dx*dx, yy = dy*dy, zz = dz*dz;
             float xy = dx*dy, yz = dy*dz, xz = dx*dz;
 
-            vec3 sh2_0 = vec3(sh_rest[base+9],  sh_rest[base+10], sh_rest[base+11]); // Y_{2,-2}
-            vec3 sh2_1 = vec3(sh_rest[base+12], sh_rest[base+13], sh_rest[base+14]); // Y_{2,-1}
-            vec3 sh2_2 = vec3(sh_rest[base+15], sh_rest[base+16], sh_rest[base+17]); // Y_{2, 0}
-            vec3 sh2_3 = vec3(sh_rest[base+18], sh_rest[base+19], sh_rest[base+20]); // Y_{2, 1}
-            vec3 sh2_4 = vec3(sh_rest[base+21], sh_rest[base+22], sh_rest[base+23]); // Y_{2, 2}
+            vec3 sh2_0 = vec3(fetchRest(base+9u),  fetchRest(base+10u), fetchRest(base+11u)); // Y_{2,-2}
+            vec3 sh2_1 = vec3(fetchRest(base+12u), fetchRest(base+13u), fetchRest(base+14u)); // Y_{2,-1}
+            vec3 sh2_2 = vec3(fetchRest(base+15u), fetchRest(base+16u), fetchRest(base+17u)); // Y_{2, 0}
+            vec3 sh2_3 = vec3(fetchRest(base+18u), fetchRest(base+19u), fetchRest(base+20u)); // Y_{2, 1}
+            vec3 sh2_4 = vec3(fetchRest(base+21u), fetchRest(base+22u), fetchRest(base+23u)); // Y_{2, 2}
 
             color += C2_0 * xy                  * sh2_0
                    + C2_1 * yz                  * sh2_1
@@ -104,13 +141,13 @@ void main() {
                    + C2_4 * (xx - yy)           * sh2_4;
 
             if (u_shDegree >= 3) {
-                vec3 sh3_0 = vec3(sh_rest[base+24], sh_rest[base+25], sh_rest[base+26]); // Y_{3,-3}
-                vec3 sh3_1 = vec3(sh_rest[base+27], sh_rest[base+28], sh_rest[base+29]); // Y_{3,-2}
-                vec3 sh3_2 = vec3(sh_rest[base+30], sh_rest[base+31], sh_rest[base+32]); // Y_{3,-1}
-                vec3 sh3_3 = vec3(sh_rest[base+33], sh_rest[base+34], sh_rest[base+35]); // Y_{3, 0}
-                vec3 sh3_4 = vec3(sh_rest[base+36], sh_rest[base+37], sh_rest[base+38]); // Y_{3, 1}
-                vec3 sh3_5 = vec3(sh_rest[base+39], sh_rest[base+40], sh_rest[base+41]); // Y_{3, 2}
-                vec3 sh3_6 = vec3(sh_rest[base+42], sh_rest[base+43], sh_rest[base+44]); // Y_{3, 3}
+                vec3 sh3_0 = vec3(fetchRest(base+24u), fetchRest(base+25u), fetchRest(base+26u)); // Y_{3,-3}
+                vec3 sh3_1 = vec3(fetchRest(base+27u), fetchRest(base+28u), fetchRest(base+29u)); // Y_{3,-2}
+                vec3 sh3_2 = vec3(fetchRest(base+30u), fetchRest(base+31u), fetchRest(base+32u)); // Y_{3,-1}
+                vec3 sh3_3 = vec3(fetchRest(base+33u), fetchRest(base+34u), fetchRest(base+35u)); // Y_{3, 0}
+                vec3 sh3_4 = vec3(fetchRest(base+36u), fetchRest(base+37u), fetchRest(base+38u)); // Y_{3, 1}
+                vec3 sh3_5 = vec3(fetchRest(base+39u), fetchRest(base+40u), fetchRest(base+41u)); // Y_{3, 2}
+                vec3 sh3_6 = vec3(fetchRest(base+42u), fetchRest(base+43u), fetchRest(base+44u)); // Y_{3, 3}
 
                 color += C3_0 * dy * (3.0*xx - yy)            * sh3_0
                        + C3_1 * xy * dz                       * sh3_1

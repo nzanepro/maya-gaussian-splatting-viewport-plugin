@@ -10,7 +10,7 @@ in Autodesk Maya Viewport 2.0.
 - Load standard 3DGS `.ply` files (position, rotation, scale, opacity, SH coefficients)
 - View-dependent color via SH degrees 0–3 (auto-detected from PLY, runtime-capped via attribute)
 - EWA Splatting: full GPU projection of 3D covariance to 2D ellipses
-- GPU Bitonic Sort: depth sort skipped when camera is static (performance optimization)
+- Depth sort skipped when the camera is static; GPU bitonic sort on OpenGL 4.3, CPU radix sort on the 4.1 fallback
 - Maya scene integration: Reversed-Z depth test compatible, non-destructive
 - Maya node attributes: `filePath`, `splatScale`, `opacityMult`, `shDegree`, `sRGBToLinear`, `gamma`
 
@@ -25,11 +25,9 @@ in Autodesk Maya Viewport 2.0.
 | vcpkg | Windows only |
 | GLEW | Windows: via vcpkg. macOS: `brew install glew` |
 
-> **Windows is the only platform where this plugin renders.** The build is
-> cross-platform and macOS produces a loadable `.bundle`, but the renderer
-> requires OpenGL 4.3 compute shaders and SSBOs, which Apple's OpenGL
-> implementation does not provide — see
-> [Platform support](#platform-support).
+The renderer picks its path from the OpenGL context at runtime — a 4.3 compute
+path on Windows, a 4.1 fallback on macOS. See
+[Platform support](#platform-support).
 
 ## Pre-built binaries
 
@@ -104,7 +102,8 @@ line — Maya 2027's DevKit requires C++20. Maya 2024–2026 default to C++17.
    interchangeable** across Maya versions — use the zip or source build
    matching your Maya.
 2. **Set Viewport 2.0 to OpenGL Core Profile** — this plugin uses OpenGL and will
-   not render under DirectX 11 (Maya's default on Windows):
+   not render under DirectX 11 (Maya's default on Windows). macOS is always
+   OpenGL Core Profile, so there is nothing to change there:
    **Windows → Settings/Preferences → Preferences → Display → Viewport 2.0**
    → set *Rendering engine* to **OpenGL Core Profile (Compatibility)**.
    Restart Maya after changing this setting.
@@ -140,40 +139,52 @@ Adjustable attributes:
 plugin.cpp              → initializePlugin / uninitializePlugin
 GaussianNode            → MPxLocatorNode, owns SplatData
 GaussianDrawOverride    → MPxDrawOverride, manages OpenGL state
-GaussianRenderer        → OpenGL VAO/SSBO, shader management, sort, draw
+GaussianRenderer        → OpenGL buffers, shader management, sort, draw;
+                          selects the 4.3 or 4.1 path from context capabilities
 PlyLoader               → tinyply wrapper, parses .ply, converts scale/opacity
 src/shaders/
-  gaussian.vert/frag    → EWA splatting + pre-multiplied alpha
-  depth.comp            → per-splat camera depth calculation
-  sort.comp             → GPU Bitonic Sort
+  gaussian.vert/frag    → EWA splatting + pre-multiplied alpha; the vertex
+                          shader covers both paths via GS_USE_SSBO
+  depth.comp            → per-splat camera depth calculation (4.3 only)
+  sort.comp             → GPU Bitonic Sort (4.3 only)
 third_party/tinyply     → PLY parsing library
 ```
 
 ## Platform support
 
-| Platform | Builds | Renders |
-| -------- | ------ | ------- |
-| Windows | yes | yes |
-| macOS | yes (`.bundle`) | **no** |
+| Platform | Plug-in | Depth sort | Splat data |
+| -------- | ------- | ---------- | ---------- |
+| Windows | `.mll` | GPU bitonic (compute shader) | SSBO |
+| macOS | `.bundle` | CPU radix | Texture buffers |
 
-Apple's OpenGL implementation is frozen at 4.1 Core and will not advance;
+Apple's OpenGL implementation is frozen at 4.1 Core and will not advance, so
 `GL_ARB_compute_shader` and `GL_ARB_shader_storage_buffer_object` are both
-absent. This renderer needs them for three things that have no 4.1 fallback:
+absent. The renderer detects this on the first draw and falls back:
 
-- `depth.comp` and `sort.comp` are compute shaders (`#version 450`)
-- the GPU bitonic depth sort dispatches those compute shaders per frame
-- every per-splat buffer (positions, rotations, scales, SH coefficients,
-  sorted indices) is bound as an SSBO in `gaussian.vert`
+- **Depth sort** moves to the CPU — an LSD radix sort over the same
+  view-space Z keys `depth.comp` computes, producing the identical
+  back-to-front order. It still only runs when the camera has moved.
+- **Per-splat buffers** are bound as texture buffers and read with
+  `texelFetch` instead of as SSBOs. The buffer objects are the same; only the
+  view differs.
+- **The sorted index** arrives as an instanced vertex attribute rather than
+  an indexed SSBO read.
 
-So on macOS the plugin compiles, links, and loads into Maya, but the shader
-programs fail to build and nothing is drawn. Porting to macOS means replacing
-the compute-shader sort with a CPU or transform-feedback sort and replacing
-the SSBOs with texture buffers — or moving the renderer to Metal.
+`gaussian.vert` serves both paths from one source, switched on a `GS_USE_SSBO`
+define, so the EWA projection and SH evaluation cannot drift apart. The
+`#version` line is supplied by the loader rather than the file.
+
+Expect the macOS path to be slower on large scenes: the sort is single-threaded
+on the CPU and its result is uploaded each time the camera moves, where the
+Windows path keeps everything resident on the GPU. Scenes in the low hundreds
+of thousands of splats are comfortable; multi-million-splat scenes will not be.
 
 ## Known Limitations
 
 - Large scenes (3M+ splats) require ~250 GPU dispatches per frame when the camera
   moves, which may trigger TDR on lower-end GPUs.
+- On macOS the depth sort is single-threaded on the CPU, so frame time during
+  camera movement scales with splat count.
 
 ## License
 

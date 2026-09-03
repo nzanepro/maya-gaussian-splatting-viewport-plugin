@@ -1,4 +1,4 @@
-#version 450
+// #version supplied by GaussianRenderer::loadShader.
 
 in  vec2  v_uv;
 in  vec4  v_color;
