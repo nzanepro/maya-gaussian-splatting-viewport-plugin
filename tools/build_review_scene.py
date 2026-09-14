@@ -55,13 +55,19 @@ def build(ply,
     root = cmds.group(empty=True, name=f"{prefix}_splat_root_GRP")
     for ax in "XYZ":
         cmds.setAttr(root + ".scale" + ax, float(scale))
-    flip = cmds.group(empty=True, name="splat_flip_GRP", parent=root)
+    flip = cmds.group(empty=True,
+                      name=f"{prefix}_splat_flip_GRP",
+                      parent=root)
     if g['upside_down']:
         cmds.setAttr(flip + ".rotateX", 180.0)
-    level = cmds.group(empty=True, name="splat_level_GRP", parent=flip)
+    level = cmds.group(empty=True,
+                       name=f"{prefix}_splat_level_GRP",
+                       parent=flip)
     cmds.setAttr(level + ".rotateX", -g['rot_x'])
     cmds.setAttr(level + ".rotateZ", -g['rot_z'])
-    shift = cmds.group(empty=True, name="splat_shift_GRP", parent=level)
+    shift = cmds.group(empty=True,
+                       name=f"{prefix}_splat_shift_GRP",
+                       parent=level)
     cmds.setAttr(shift + ".translateY", -g['y_at_origin'])
 
     # ---- the splat node ----------------------------------------------------
@@ -140,20 +146,20 @@ def build(ply,
         cmds.setAttr(sph + ".visibility", 0)  # on tap, off by default
         made += [loc, sph]
 
-    ground = cmds.polyPlane(name=f"{prefix}_groundFit",
+    ground_plane = cmds.polyPlane(name=f"{prefix}_groundFit",
                             w=1,
                             h=1,
                             sx=1,
                             sy=1,
                             ch=False)[0]
     span = float(max(b['size'])) * 2.0
-    _adopt(ground,
+    _adopt(ground_plane,
            shift,
            t=(0.0, g['y_at_origin'], 0.0),
            r=(g['rot_x'], 0.0, g['rot_z']),
            s=(span, 1.0, span))
-    _wire(ground)
-    cmds.setAttr(ground + ".visibility", 0)
+    _wire(ground_plane)
+    cmds.setAttr(ground_plane + ".visibility", 0)
 
     # ---- verify the rig against real geometry ------------------------------
     # Checking the transformed normal alone is ambiguous: the body sits on the
@@ -236,7 +242,9 @@ def build(ply,
     # the subject out of the statistics is unreliable; comparing it to a
     # correctly sized box is not.
     if ref_size:
-        ref = cmds.polyCube(name=ref_name + "_sizeRef",
+        # Not parented under the rig, so it needs the prefix too when several
+        # captures share a scene.
+        ref = cmds.polyCube(name=(ref_name or prefix) + "_sizeRef",
                             w=1,
                             h=1,
                             d=1,
@@ -319,7 +327,7 @@ if __name__ == '__main__':
         '--scale',
         type=float,
         default=1.0,
-        help='centimetres per PLY unit, applied to splat_root_GRP. '
+        help='centimetres per PLY unit, applied to the root group. '
         'Polycam exports are not reliably metric; calibrate '
         'against --ref-size rather than assuming.')
     ap.add_argument('--splat-scale',
@@ -336,7 +344,10 @@ if __name__ == '__main__':
         metavar=('W', 'H', 'D'),
         help='build a wireframe box of this real size in cm, standing '
         'on the ground, to calibrate --scale against by eye')
-    ap.add_argument('--ref-name', default='ref', dest='ref_name')
+    ap.add_argument('--ref-name',
+                    default=None,
+                    dest='ref_name',
+                    help='name for the size reference (defaults to --prefix)')
     ap.add_argument('--ground',
                     choices=('auto', 'level', 'sloped'),
                     default='auto',
