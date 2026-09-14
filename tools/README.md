@@ -50,25 +50,36 @@ content; indoors it is flat painted wall, which gives no parallax — so an
 interior can carry a *larger* shell than an exterior. Measured: 6.7% of an
 interior bedroom capture against 1.3% of an outdoor walkaround.
 
-**The p95 gap technique.** The original approach, and still the right intuition:
-the shell is separated from the real scene by an empty radial band, so sort the
-radii, look at the tail above p95, and cut at the widest gap in it. No
-scene-specific threshold, and on the X-29 it lands cleanly — a 1.05-wide void
-at radius 13.65.
+Two methods, selected with `--shell-method`. Both are validated by the same
+three tests below, so the only difference is where the cut comes from.
 
-**Why it is no longer used alone.** Searching only above p95 assumes the shell
-is smaller than 5% of the scene. On the 6.7% bedroom, p95 already lies *inside*
-the shell, so the search saw nothing but shell points, found no void, and
-reported no shell at all. The failure is silent — a clean "none detected", not
-an error.
+**`gap`** — the original. Sort the radii, look at the tail above
+`--shell-percentile` (default 95), cut at the widest gap in it. Assumption-light
+and clean when it works.
 
-**What runs now.** Scan candidate cuts outward and take the first that leaves a
-thin, populated shell behind it. Candidates are the largest relative jumps in
-the sorted radii — the same gap idea, no longer restricted to the tail — plus a
-spread of percentiles from p50 to p99.5 so a shell with no crisp void is still
-found. The p95 gap is one of the candidates rather than the only one. Taking
-the *smallest* qualifying cut matters: a larger one slices off the shell's
-inner face.
+**`scan`** — the default. Walk candidate cuts outward and take the first
+leaving a thin, populated shell, where the candidates are the largest relative
+jumps in the sorted radii plus a spread of percentiles from p50 to p99.5. The
+gap idea is still in there, just not restricted to one tail. Taking the
+*smallest* qualifying cut matters: a larger one slices off the shell's inner
+face.
+
+`gap`'s assumption is that the shell is smaller than the remaining
+`100 - percentile` per cent of the scene. At the default 95 that breaks on the
+6.7% bedroom, where p95 lies *inside* the shell, so the search sees only shell
+points and finds no void. The failure is silent — a clean "none detected", not
+an error — which is why the percentile is exposed rather than the method
+retired. Measured on the same two captures:
+
+| Capture | `scan` | `gap` @ p95 | `gap` @ p50 |
+| ------- | ------ | ----------- | ----------- |
+| X-29, outdoor | cut 13.55, 1.34% | cut 13.55, 1.34% | — |
+| Bedroom, interior | cut 1.74, 6.72%, ratio 0.018 | **none detected** | cut 3.21, 6.71%, ratio 0.005 |
+
+Where both work they agree exactly. Where `gap` is given a workable percentile
+it can beat `scan`: on the bedroom it isolates the same shell to three decimal
+places on the centre, with a thickness/radius of 0.005 against 0.018 and a
+1.618-wide void against 0.038.
 
 A candidate qualifies on three tests together, because thinness alone is not
 enough — any handful of stray outliers sits near *some* sphere:

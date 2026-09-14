@@ -60,7 +60,10 @@ def read_positions(path):
     return np.stack([arr['x'], arr['y'], arr['z']], axis=1).astype(np.float64)
 
 
-def find_shell(xyz):
+SHELL_METHODS = ('scan', 'gap')
+
+
+def find_shell(xyz, method='scan', gap_percentile=95.0):
     """Locate the background sphere projection.
 
     3DGS pushes anything whose depth the optimiser cannot constrain out onto a
@@ -69,46 +72,73 @@ def find_shell(xyz):
     interior can carry a *larger* shell than an exterior — measured at 6.7% of
     an interior bedroom capture against 1.3% of an outdoor one.
 
-    That range is why the cut is not taken from a fixed percentile. Searching
-    the tail above p95 assumes the shell is smaller than 5% of the scene; on
-    the bedroom p95 already lies inside the shell, so the search saw only shell
-    points, found no void, and reported nothing.
+    Two ways to choose the cut, both validated by the same three tests in
+    `_fit_sphere` so the only difference is where the cut comes from:
 
-    Instead scan candidate cuts outward and take the first that leaves a thin,
-    populated shell behind it. The smallest such cut is the right one: it keeps
-    the shell whole, where a larger cut would slice off its inner face.
+    `gap` — the original. Sort the radii, look at the tail above
+    `gap_percentile`, cut at the widest gap in it. Clean and assumption-light
+    when it works: on an outdoor walkaround it finds a 1.05-wide void at
+    radius 13.65 with nothing to tune. Its assumption is that the shell is
+    smaller than the remaining `100 - gap_percentile` per cent of the scene. At
+    the default 95 that broke on the 6.7% bedroom, where p95 already lies
+    *inside* the shell, so the search saw only shell points and found no void.
+    Lower `gap_percentile` and it works there too, which is why the knob is
+    exposed rather than the method retired.
+
+    `scan` — the default. Scan candidate cuts outward and take the first that
+    leaves a thin, populated shell behind it, where the candidates are the
+    largest relative jumps in the sorted radii plus a spread of percentiles.
+    The gap idea is still in there, no longer restricted to one tail. Taking
+    the smallest qualifying cut matters: a larger one slices off the shell's
+    inner face.
     """
+    if method not in SHELL_METHODS:
+        raise ValueError('unknown shell method %r, expected one of %r'
+                         % (method, SHELL_METHODS))
+
     centre = np.median(xyz, axis=0)
     radius = np.linalg.norm(xyz - centre, axis=1)
     n_total = len(xyz)
-
-    # Candidates: every large relative jump in the sorted radii, plus a spread
-    # of percentiles so a shell with no crisp void is still found.
     order = np.sort(radius)
-    lo_i = int(0.5 * len(order))
-    tail = order[lo_i:]
-    with np.errstate(divide='ignore', invalid='ignore'):
-        ratio = np.diff(tail) / np.maximum(tail[:-1], 1e-9)
-    cuts = [0.5 * (tail[i] + tail[i + 1]) for i in np.argsort(ratio)[-12:]]
-    cuts += list(np.percentile(radius, np.linspace(50, 99.5, 40)))
+
+    if method == 'gap':
+        tail = order[order > np.percentile(radius, gap_percentile)]
+        if len(tail) < 2:
+            return dict(cut=float(order[-1]), gap=0.0, n_total=int(n_total),
+                        found=False, method=method)
+        gaps = np.diff(tail)
+        i = int(np.argmax(gaps))
+        cuts = [0.5 * (tail[i] + tail[i + 1])]
+    else:
+        # Candidates: every large relative jump in the sorted radii, plus a
+        # spread of percentiles so a shell with no crisp void is still found.
+        lo_i = int(0.5 * len(order))
+        tail = order[lo_i:]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.diff(tail) / np.maximum(tail[:-1], 1e-9)
+        cuts = [0.5 * (tail[i] + tail[i + 1]) for i in np.argsort(ratio)[-12:]]
+        cuts += list(np.percentile(radius, np.linspace(50, 99.5, 40)))
 
     best = None
     for cut in sorted(set(float(c) for c in cuts)):
         gap = _void_width(order, cut)
         fit = _fit_sphere(xyz[radius > cut], n_total, cut, gap)
         if fit and fit['found']:
-            fit.update(cut=float(cut), gap=float(gap), n_total=int(n_total))
+            fit.update(cut=float(cut), gap=float(gap), n_total=int(n_total),
+                       method=method)
             best = fit
             break
 
     if best is None:
         cut = float(cuts[0]) if cuts else float(np.percentile(radius, 99))
         gap = _void_width(order, cut)
-        base = dict(cut=cut, gap=gap, n_total=int(n_total), found=False)
+        base = dict(cut=cut, gap=gap, n_total=int(n_total), found=False,
+                    method=method)
         fit = _fit_sphere(xyz[radius > cut], n_total, cut, gap)
         if fit:
             base.update(fit)
             base['found'] = False
+            base['method'] = method
         return base
     return best
 
@@ -310,7 +340,8 @@ def find_ground(core, seed=0, tol=0.05, iters=800, max_tilt=40.0, ground='auto',
                 body_height=float(abs(np.percentile(signed, 0.5))))
 
 
-def analyze(path, percent=100.0, seed=0, ground='auto', up_axis=None):
+def analyze(path, percent=100.0, seed=0, ground='auto', up_axis=None,
+            shell_method='scan', gap_percentile=95.0):
     """Analyse `percent` of the splats, taken as every Nth point.
 
     percent=10 keeps every 10th splat, percent=100 keeps all. Striding rather
@@ -329,7 +360,8 @@ def analyze(path, percent=100.0, seed=0, ground='auto', up_axis=None):
     stride = max(1, int(round(100.0 / max(percent, 1e-9))))
     xyz = full[::stride] if stride > 1 else full
 
-    shell = find_shell(xyz)
+    shell = find_shell(xyz, method=shell_method,
+                       gap_percentile=gap_percentile)
     centre = np.median(xyz, axis=0)
 
     if stride > 1:
@@ -339,6 +371,7 @@ def analyze(path, percent=100.0, seed=0, ground='auto', up_axis=None):
         if refit:
             shell.update(refit)
             shell['n_total'] = full_n
+            shell['method'] = shell_method
         core = full[full_r <= shell['cut']][::stride]
     else:
         core = xyz[np.linalg.norm(xyz - centre, axis=1) <= shell['cut']]
@@ -361,13 +394,13 @@ def analyze(path, percent=100.0, seed=0, ground='auto', up_axis=None):
                 aabb_before=(xyz.min(axis=0), xyz.max(axis=0)))
 
 
-def report(res):
+def report(res, gap_pct=95.0):
     s, g, b = res['shell'], res['ground'], res['box']
     print("%s\n  %d splats (analysed %d — every %s)"
           % (res['path'], res['n_total'], res['analysed'],
              "point" if res['stride'] == 1 else "%dth point" % res['stride']))
 
-    print("\nSPHERE PROJECTION")
+    print("\nSPHERE PROJECTION  [method: %s]" % s.get('method', 'scan'))
     if s.get('found'):
         print("  detected — cut radius %.4f, %d splats beyond (%.2f%%)"
               % (s['cut'], s['n_shell'], 100.0 * s['n_shell'] / s['n_total']))
@@ -388,8 +421,20 @@ def report(res):
         else:
             why.append("fewer than 16 splats beyond the cut")
         print("  none detected — %s" % "; ".join(why))
-        print("  (expected for interiors: a closed room has no distant content "
-              "to project onto a sphere)")
+        # Do NOT explain this away. An earlier version of this tool asserted
+        # that interiors have no distant content to project onto a sphere.
+        # That reasoning is plausible and wrong: interiors carry LARGER shells
+        # than exteriors, because flat painted wall gives no parallax. The
+        # bedroom capture this line used to print on has a 6.7% shell.
+        if s.get('method') == 'gap':
+            print("  the gap method searches above p%g and so assumes the shell "
+                  "is smaller than the remaining %g%% of the scene."
+                  % (gap_pct, 100.0 - gap_pct))
+            print("  Try a lower --shell-percentile, or --shell-method scan, "
+                  "before concluding there is no shell.")
+        else:
+            print("  Try --shell-method gap with a low --shell-percentile "
+                  "before concluding there is no shell.")
 
     print("\nGROUND PLANE")
     print("  normal  [%+.5f %+.5f %+.5f]   %d/%d inliers (%.1f%%)"
@@ -483,6 +528,15 @@ def main():
                     help='percentage of splats to analyse, taken as every Nth '
                          'point (10 = every 10th). Default 100. The ground fit '
                          'holds down to well under 1 percent.')
+    ap.add_argument('--shell-method', choices=SHELL_METHODS, default='scan',
+                    dest='shell_method',
+                    help="how to choose the shell cut: 'scan' (default) walks "
+                         "candidates outward; 'gap' takes the widest gap above "
+                         "--shell-percentile, which is cleaner when it works "
+                         "but assumes the shell is smaller than the tail")
+    ap.add_argument('--shell-percentile', type=float, default=95.0,
+                    dest='gap_percentile',
+                    help='percentile the gap method searches above (default 95)')
     ap.add_argument('--ground', choices=('auto', 'level', 'sloped'), default='auto',
                     help="'auto' (default) snaps a fitted tilt under 3 degrees to "
                          "the gravity axis and keeps anything larger; 'level' always "
@@ -491,7 +545,10 @@ def main():
                     help='force the up axis in capture space, bypassing the fit. '
                          'Use when the solve is not gravity-aligned.')
     args = ap.parse_args()
-    report(analyze(args.ply, percent=args.percent, ground=args.ground, up_axis=args.up))
+    report(analyze(args.ply, percent=args.percent, ground=args.ground,
+                   up_axis=args.up, shell_method=args.shell_method,
+                   gap_percentile=args.gap_percentile),
+           gap_pct=args.gap_percentile)
 
 
 if __name__ == '__main__':

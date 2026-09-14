@@ -14,6 +14,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from analyze_splat_ply import SHELL_METHODS as A_SHELL_METHODS  # noqa: E402
+
 
 def build(ply,
           out,
@@ -27,7 +29,9 @@ def build(ply,
           ref_size=None,
           ref_name='ref',
           ground='auto',
-          up_axis=None):
+          up_axis=None,
+          shell_method='scan',
+          gap_percentile=95.0):
     import maya.standalone
     maya.standalone.initialize(name='python')
     import maya.cmds as cmds
@@ -35,7 +39,12 @@ def build(ply,
     import analyze_splat_ply as A
 
     print("[review] analysing %s" % ply)
-    res = A.analyze(ply, percent=percent, ground=ground, up_axis=up_axis)
+    res = A.analyze(ply,
+                    percent=percent,
+                    ground=ground,
+                    up_axis=up_axis,
+                    shell_method=shell_method,
+                    gap_percentile=gap_percentile)
     A.report(res)
     g, s, b = res['ground'], res['shell'], res['box']
 
@@ -352,6 +361,16 @@ if __name__ == '__main__':
                     choices=('auto', 'level', 'sloped'),
                     default='auto',
                     help="see analyze_splat_ply.py --ground")
+    ap.add_argument('--shell-method',
+                    choices=A_SHELL_METHODS,
+                    default='scan',
+                    dest='shell_method',
+                    help="see analyze_splat_ply.py --shell-method")
+    ap.add_argument('--shell-percentile',
+                    type=float,
+                    default=95.0,
+                    dest='gap_percentile',
+                    help='percentile the gap method searches above')
     ap.add_argument('--up',
                     nargs=3,
                     type=float,
@@ -360,4 +379,4 @@ if __name__ == '__main__':
     a = ap.parse_args()
     build(a.ply, a.out, a.prefix, a.plugin, a.percent, a.display_percent,
           a.box_trim, a.scale, a.splat_scale, a.ref_size, a.ref_name, a.ground,
-          a.up)
+          a.up, a.shell_method, a.gap_percentile)
